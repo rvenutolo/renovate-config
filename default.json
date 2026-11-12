@@ -1,4 +1,100 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:best-practices"]
+  "description": [
+    "extends config:best-practices: its contents (workarounds, replacements, monorepo groups) change with Renovate releases, in exchange for not maintaining them. Every behavior below is still set explicitly, so an upstream change to that preset cannot silently change a decided behavior.",
+    "timezone America/New_York: the schedules below are evaluated in the maintainer's local time.",
+    "schedule Friday 6pm through Sunday 6pm: the window spans the whole weekend because each merge leaves the remaining PRs behind main and only a Renovate run rebases them, so a week's chain needs about one run per PR. The hosted app runs each repo about every 4 hours, giving the window roughly 12 runs.",
+    "lockFileMaintenance Saturday 6pm through Sunday 6pm: Renovate's default and config:best-practices give it its own Monday schedule that the top-level schedule does not override. It runs in the second half of the window so the lock file is regenerated once, on top of most of the week's merged updates; alongside the batch it would force whichever PR merges second to regenerate and rerun CI. It is not placed entirely after the main window because that leaves only one or two runs, and a missed lock-file PR would wait a week.",
+    "automerge true, automergeType pr, platformAutomerge true: every update type, majors included, merges through GitHub auto-merge. These are top-level keys because the lock-file maintenance upgrade has no package name, so a matchPackageNames * rule never matches it and its PR would sit unmerged.",
+    "rebaseWhen behind-base-branch: every consuming repo is assumed to require branches to be up to date before merging, so a PR must be rebased when it falls behind the base branch, not only on conflicts. Renovate's default auto resolves to the same thing today; it is pinned here.",
+    "updateNotScheduled false: nothing touches a Renovate branch outside the window, so no midweek pushes or emails. A PR that fails CI waits until it is fixed or until the next window.",
+    "prHourlyLimit 0, prConcurrentLimit 0, branchConcurrentLimit 0: no PR limits inside the window, so the whole batch can open and merge in one weekend.",
+    "dependencyDashboard true: the dashboard stays on as the overview of pending and held updates.",
+    "configMigration false: config:best-practices turns on config-migration PRs, which come from a separate code path, may ignore the schedule and automerge, and would match the failure workflow's renovate/* filter. With it off, a needed migration shows as a Dependency Dashboard checkbox instead.",
+    "semanticCommits enabled with type chore and scope deps: commit messages and PR titles follow the Angular convention, chore(deps): ...",
+    "labels dependencies: Renovate PRs carry the dependencies label.",
+    "nix enabled: flake.lock inputs are updated.",
+    "vulnerabilityAlerts: security fixes go out right away, each in its own PR, ignoring the weekly schedule, grouping and release age, and automerge like everything else. schedule [], minimumReleaseAge null and groupName null are the defaults, written out. It relies on Dependabot alerts being enabled for the repo.",
+    "packageRules, in order: the non-major batch, the 7-day release age, the release-age carve-outs, and the exemption for this preset's own releases. Order matters because a later rule wins. Consumers override with a later packageRules entry, not a top-level key."
+  ],
+  "extends": ["config:best-practices"],
+  "timezone": "America/New_York",
+  "schedule": ["* 18-23 * * 5", "* * * * 6", "* 0-17 * * 0"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["* 18-23 * * 6", "* 0-17 * * 0"],
+    "automerge": true
+  },
+  "automerge": true,
+  "automergeType": "pr",
+  "platformAutomerge": true,
+  "updateNotScheduled": false,
+  "rebaseWhen": "behind-base-branch",
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 0,
+  "branchConcurrentLimit": 0,
+  "dependencyDashboard": true,
+  "configMigration": false,
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "labels": ["dependencies"],
+  "nix": {
+    "enabled": true
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": [],
+    "minimumReleaseAge": null,
+    "groupName": null,
+    "automerge": true
+  },
+  "packageRules": [
+    {
+      "description": [
+        "One weekly PR for every non-major update type. Hand-written because group:allNonMajor covers only minor and patch, so each Action or Docker digest bump would get its own PR.",
+        "Majors are left out so each gets its own PR. To batch them too, add \"major\" to matchUpdateTypes."
+      ],
+      "matchPackageNames": ["*"],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "pinDigest",
+        "digest",
+        "lockfileUpdate",
+        "bump",
+        "replacement"
+      ],
+      "groupName": "all non-major dependencies",
+      "groupSlug": "all-non-major"
+    },
+    {
+      "description": "Wait 7 days after release before proposing an update. Set in a packageRules entry, not top-level, because config:best-practices includes a packageRules entry (security:minimumReleaseAgeNpm, npm, 3 days) that would beat a top-level value.",
+      "matchPackageNames": ["*"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "No release age for update types where it makes no sense, copied from Renovate's own carve-outs. Lock-file maintenance never matches the * rule, but the carve-out stops a later rule keyed on update types from catching it.",
+      "matchUpdateTypes": [
+        "lockFileMaintenance",
+        "pin",
+        "replacement",
+        "bump",
+        "rollback",
+        "lockfileUpdate"
+      ],
+      "minimumReleaseAge": null
+    },
+    {
+      "description": "Digests often have no release timestamp. Under the default timestamp-required they would be held indefinitely, so a missing timestamp is allowed.",
+      "matchUpdateTypes": ["digest", "pinDigest"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
+    },
+    {
+      "description": "This preset's own releases skip the release age, so a release reaches consumers in the next window. Must come after the 7-day rule. Renovate names this repo rvenutolo/renovate-config both for github> preset references and for uses: reusable-workflow references.",
+      "matchPackageNames": ["rvenutolo/renovate-config"],
+      "minimumReleaseAge": null
+    }
+  ]
 }
