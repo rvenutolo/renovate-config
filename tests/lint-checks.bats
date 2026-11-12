@@ -226,3 +226,18 @@ function gate_in_fixture() {
   [[ "${stderr}" == *'[run-lint-checks] running editorconfig-checker'* ]]
   [[ "${stderr}" == *'[run-lint-checks] one or more linters failed'* ]]
 }
+
+@test "lint checks: markdownlint skips the generated CHANGELOG.md" {
+  # release-please writes CHANGELOG.md in its own format on every release PR;
+  # linting it would redden every release PR with nothing a human can fix.
+  printf '# Title\n' > "${FIXTURE}/README.md"
+  printf '# Changelog\n' > "${FIXTURE}/CHANGELOG.md"
+  git -C "${FIXTURE}" add -- 'README.md' 'CHANGELOG.md'
+  local -r log="${BATS_TEST_TMPDIR}/markdownlint.log"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" >> "%s"\n' "${log}" > "${STUB_DIR}/markdownlint-cli2"
+  run --separate-stderr gate_in_fixture
+  assert_success
+  run cat "${log}"
+  assert_line 'README.md'
+  refute_line 'CHANGELOG.md'
+}
