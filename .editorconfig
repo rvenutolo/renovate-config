@@ -50,5 +50,17 @@ binary_next_line = true
 switch_case_indent = true
 space_redirects = true
 
+[scripts/**]
+shell_variant = bash
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+
+[tests/fixtures/gh-stub/**]
+shell_variant = bash
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+
 [*.md]
 trim_trailing_whitespace = false

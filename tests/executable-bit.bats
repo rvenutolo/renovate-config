@@ -18,6 +18,8 @@ readonly -a FIXTURE_EXECUTABLE=(
   '.githooks/pre-commit'
   'run-all-checks'
   'run-tests'
+  'scripts/thing'
+  'tests/fixtures/gh-stub/gh'
 )
 # The same, one per EXPECT_NON_EXECUTABLE row.
 readonly -a FIXTURE_NON_EXECUTABLE=(

@@ -60,6 +60,8 @@ readonly EXPECT_EXECUTABLE=(
   '.githooks/*'
   'run-all-checks'
   'run-tests'
+  'scripts/*'
+  'tests/fixtures/gh-stub/gh'
 )
 readonly EXPECT_NON_EXECUTABLE=(
   '.ci/required-tools'

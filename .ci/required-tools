@@ -41,7 +41,8 @@ deadnix
 statix
 # every repo-tooling script derives the repo root via `git rev-parse`
 git
-# JSON inspection in the repo's scripts and tests
+# scripts/renovate-failure-issue builds and reads its GitHub API payloads with
+# it, and the BATS tests inspect JSON with it
 jq
 # the task runner the .justfile documents; .ci/run-lint-checks verifies its
 # formatting with `just --fmt`

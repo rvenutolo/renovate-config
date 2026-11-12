@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+
+# @description File, update and close the issue that tracks a Renovate PR whose
+#              CI failed. One issue per PR, labeled `dependencies` and
+#              `renovate-failure`, found again through the hidden marker on the
+#              first line of its body:
+#
+#                <!-- renovate-failure pr=<N> count=<K> -->
+#
+#              `open` runs after a CI run on a `renovate/*` branch fails. It
+#              looks up the branch's PR and does nothing unless that PR is
+#              still open: a run can finish after its PR closed, and an issue
+#              filed then would never be closed. A first failure creates the
+#              issue; a repeat failure rewrites the body of the existing one
+#              and bumps the count. It never comments, because every comment
+#              emails the user and a broken PR re-fails after each merge in the
+#              window.
+#
+#              `close` runs when a Renovate PR closes. It records the outcome
+#              in the body and closes the issue as `completed` (merged) or
+#              `not_planned` (closed unmerged), again without a comment. With
+#              no matching open issue it does nothing, so a repeated or
+#              re-queued run is harmless.
+#
+#              Branch names, PR titles and bodies, job names and job logs are
+#              untrusted: they reach jq only through --arg, --rawfile or stdin,
+#              and reach gh only as request bodies on stdin, never as program
+#              text or as part of a command line other than the URL-encoded
+#              branch in the PR lookup.
+# @arg $1 subcommand `open` or `close`
+# @env GITHUB_REPOSITORY `owner/repo`, both subcommands
+# @env RUN_ID, RUN_URL, HEAD_BRANCH, RUN_CONCLUSION the failed run, for `open`;
+#      RUN_CONCLUSION is one of `failure`, `timed_out`, `startup_failure`
+# @env PR_NUMBER, PR_MERGED the closed PR, for `close`; PR_MERGED is `true` or
+#      `false`
+# @env LOG_TAIL_LINES optional, how many trailing lines of each failed job's
+#      log to include; default 60
+# @stderr a `[<script>] <message>` line per action taken or skipped, gh's own
+#         error output, the usage line; the ERR trap's
+#         `[<script>] ERROR: ...` report when a command fails
+# @exitcode 0 the issue was created, updated or closed, or there was
+#             deliberately nothing to do
+# @exitcode 1 a GitHub API call failed
+# @exitcode 2 a missing or unknown subcommand, or a missing or malformed
+#             environment variable
+# @exitcode * otherwise the status of a failing local command
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+readonly FAILURE_LABEL='renovate-failure'
+readonly DEPENDENCIES_LABEL='dependencies'
+# GitHub rejects an issue body over 65,536 characters; the margin keeps a later
+# `close`, which appends one outcome line, under that limit too.
+readonly BODY_LIMIT=65000
+# GitHub rejects an issue title over 256 characters.
+readonly TITLE_LIMIT=256
+readonly TRUNCATION_NOTE="_Log output truncated to fit GitHub's issue size limit._"
+# The backticks are Markdown code spans, not command substitutions.
+# shellcheck disable=SC2016
+readonly HOW_TO_FIX='Fix the problem on `main`, then tick the rebase checkbox in the PR; a manual rebase request overrides the schedule. Alternatively, push the fix to the Renovate branch: Renovate stops rebasing a branch with foreign commits, but GitHub auto-merge stays armed, so once CI is green the PR merges by itself as long as it is up to date with `main`.'
+
+WORK_DIR=''
+
+# @description Log one line to stderr.
+# @arg $1 message the text to log
+# @stderr the `[<script>] <message>` line
+function log() {
+  printf '[%s] %s\n' "${0##*/}" "$1" >&2
+}
+
+# @description Report a usage problem and exit 2.
+# @arg $1 message what is wrong
+# @stderr the message and the usage line
+# @exitcode 2 always
+function usage_error() {
+  log "$1"
+  printf 'usage: %s open|close (configured through the environment)\n' "${0##*/}" >&2
+  exit 2
+}
+
+# @description Report a failed API call and exit 1. Inside a command
+#              substitution this exits only the subshell, and errexit then
+#              carries the 1 out of the caller.
+# @arg $1 message what failed
+# @exitcode 1 always
+function api_error() {
+  log "$1"
+  exit 1
+}
+
+# @description Fail with exit 2 unless every named variable is set and
+#              non-empty.
+# @arg $@ names the environment variable names
+# @exitcode 2 a variable is missing
+function require_env() {
+  local name
+  for name in "$@"; do
+    if [[ -z "${!name:-}" ]]; then
+      usage_error "missing required env: ${name}"
+    fi
+  done
+}
+
+# @description Fail with exit 2 unless a variable's value matches a pattern.
+# @arg $1 name the variable name
+# @arg $2 regex the extended regex the whole value must match
+# @arg $3 expected a description of the valid values, for the message
+# @exitcode 2 the value does not match
+function require_format() {
+  local -r name="$1" regex="$2" expected="$3"
+  if [[ ! "${!name}" =~ ${regex} ]]; then
+    usage_error "invalid ${name}: expected ${expected}"
+  fi
+}
+
+# @description Run `gh api`, turning any failure into exit 1.
+# @arg $@ args the `gh api` arguments
+# @stdout the response
+# @exitcode 1 the call failed
+function gh_api() {
+  gh api "$@" || api_error "gh api ${*} failed"
+}
+
+# @description Print the newest PR whose head is HEAD_BRANCH in this
+#              repository, open or not, or nothing when there is none.
+# @stdout the PR as compact JSON, or nothing
+function find_pr() {
+  local -r owner="${GITHUB_REPOSITORY%%/*}"
+  local branch
+  branch="$(jq --null-input --raw-output --arg branch "${HEAD_BRANCH}" '$branch | @uri')"
+  gh_api "repos/${GITHUB_REPOSITORY}/pulls?head=${owner}:${branch}&state=all" \
+    | jq --compact-output 'max_by(.number) // empty'
+}
+
+# @description Print the latest attempt's jobs of run RUN_ID: how many started,
+#              and the ones that failed or timed out, in API order.
+# @stdout compact JSON `{started: <n>, failed: [{id, name, conclusion}]}`
+function failed_jobs() {
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?filter=latest" \
+    | jq --slurp --compact-output '[.[].jobs[]] | {
+        started: length,
+        failed: [.[] | select(.conclusion == "failure" or .conclusion == "timed_out")
+                     | {id, name, conclusion}]
+      }'
+}
+
+# @description Print the last LOG_TAIL_LINES lines of one job's log.
+# @arg $1 id the job id
+# @stdout the log tail
+# @exitcode 1 the log could not be fetched
+function job_log_tail() {
+  local -r id="$1"
+  gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${id}/logs" | tail --lines="${LOG_TAIL_LINES}"
+}
+
+# @description Print the updates table from a Renovate PR body: the text after
+#              the `This PR contains the following updates:` line, up to the
+#              next `---` line, trimmed. Nothing when the PR body has no such
+#              line.
+# @stdin the PR as JSON
+# @stdout the table
+function pr_updates_table() {
+  jq --raw-output '
+    (.body // "") | gsub("\r"; "") | split("\n") as $lines
+    | ($lines | map(startswith("This PR contains the following updates:")) | index(true)) as $start
+    | if $start == null then "" else
+        $lines[$start + 1:] as $rest
+        | ($rest | map(test("^---\\s*$")) | index(true)) as $end
+        | (if $end == null then $rest else $rest[:$end] end)
+        | join("\n") | sub("^\\s+"; "") | sub("\\s+$"; "")
+      end'
+}
+
+# @description Create a label unless it exists. A 422 on create means a
+#              concurrent run created it first, which is fine.
+# @arg $1 name the label name
+# @arg $2 color the label color, hex without `#`
+# @arg $3 description the label description
+# @exitcode 1 the lookup failed other than with a 404, or the create failed
+#             other than with a 422
+function ensure_label() {
+  local -r name="$1" color="$2" description="$3"
+  local err
+  # stderr is captured to tell a 404 from other failures; stdout, gh's echo of
+  # the error body, is discarded.
+  # shellcheck disable=SC2069
+  if err="$(gh api "repos/${GITHUB_REPOSITORY}/labels/${name}" 2>&1 > /dev/null)"; then
+    return 0
+  fi
+  if [[ "${err}" != *'(HTTP 404)'* ]]; then
+    printf '%s\n' "${err}" >&2
+    api_error "looking up label ${name} failed"
+  fi
+  # shellcheck disable=SC2069
+  if err="$(jq --null-input --arg name "${name}" --arg color "${color}" --arg description "${description}" \
+    '{name: $name, color: $color, description: $description}' \
+    | gh api --method POST "repos/${GITHUB_REPOSITORY}/labels" --input - 2>&1 > /dev/null)"; then
+    log "created label ${name}"
+    return 0
+  fi
+  if [[ "${err}" == *'(HTTP 422)'* ]]; then
+    log "label ${name} already exists"
+    return 0
+  fi
+  printf '%s\n' "${err}" >&2
+  api_error "creating label ${name} failed"
+}
+
+# @description Print the open failure issue whose marker names the given PR,
+#              the oldest one if there are several, or nothing.
+# @arg $1 pr the PR number
+# @stdout compact JSON `{number, count, body}`, or nothing
+function find_issue() {
+  local -r pr="$1"
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=${FAILURE_LABEL}&state=open&per_page=100" \
+    | jq --slurp --compact-output --arg pr "${pr}" '
+      [ add // [] | .[] | select(.pull_request == null)
+        | ((.body // "") | (split("\n")[0] // "") | sub("\r$"; "")
+           | capture("^<!-- renovate-failure pr=(?<pr>[0-9]+) count=(?<count>[0-9]+) -->$")) as $m
+        | select($m.pr == $pr)
+        | {number, count: ($m.count | tonumber), body}
+      ] | min_by(.number) // empty'
+}
+
+# @description Render the issue body, shortening the log tails, longest first,
+#              when it would exceed BODY_LIMIT, and noting the truncation at
+#              the end.
+# @stdin JSON `{pr: {number, html_url}, count, updates, started,
+#        run: {url, conclusion, failed_at}, jobs: [{name, conclusion, log}]}`
+# @stdout the body
+function render_body() {
+  jq --raw-output --argjson limit "${BODY_LIMIT}" --arg note "${TRUNCATION_NOTE}" \
+    --arg how_to_fix "${HOW_TO_FIX}" '
+    def fence: ([scan("`+") | length] | max // 0) as $run | "`" * ([3, $run + 1] | max);
+    def job_block:
+      (.log | fence) as $f
+      | "<details>\n<summary>\(.name | @html) (\(.conclusion))</summary>\n\n"
+        + "\($f)text\n\(.log | sub("\n$"; ""))\n\($f)\n\n</details>";
+    def render:
+      [ "<!-- renovate-failure pr=\(.pr.number) count=\(.count) -->",
+        "CI failed on Renovate PR #\(.pr.number): \(.count) failed run\(if .count == 1 then "" else "s" end) so far.",
+        "",
+        "**PR:** \(.pr.html_url)",
+        "",
+        "## Updates in this PR",
+        "",
+        (if .updates == "" then "_The PR body does not list its updates; see the PR._" else .updates end),
+        "",
+        "## Latest failed run",
+        "",
+        "- **Run:** \(.run.url)",
+        "- **Conclusion:** `\(.run.conclusion)`",
+        "- **Failure count:** \(.count)",
+        "- **Last failed:** \(.run.failed_at)",
+        (if (.jobs | length) > 0 then "- **Failed jobs:** \(.jobs | map(.name | @html) | join(", "))" else empty end),
+        "",
+        (if .started == 0 then
+           "_No jobs started: the run failed before any job ran, for example on an invalid workflow file or an action the repository does not allow._"
+         elif (.jobs | length) == 0 then
+           "_No job in this run failed or timed out; see the run for details._"
+         else .jobs | map(job_block) | join("\n\n") end),
+        "",
+        "## How to land a fix",
+        "",
+        $how_to_fix
+      ] | join("\n") + "\n";
+    # Cut the longest logs down to the next-longest, or by their share of the
+    # overflow, until the body fits; each round shortens the longest log, so
+    # this terminates. A cut drops the partial line it leaves at the start.
+    def shrink($budget):
+      (render | length) as $len
+      | ([.jobs[].log | length] | max // 0) as $top
+      | if $len <= $budget or $top == 0 then . else
+          ([.jobs[].log | length | select(. < $top)] | max // 0) as $next
+          | ([.jobs[] | select((.log | length) == $top)] | length) as $k
+          | ([$next, $top - ((($len - $budget) + $k - 1) / $k | floor)] | max) as $keep
+          | .jobs |= map(
+              if (.log | length) == $top then
+                .log |= (.[length - $keep:] | if test("\n") then sub("^[^\n]*\n"; "") else . end)
+              else . end)
+          | shrink($budget)
+        end;
+    render as $full
+    | if ($full | length) <= $limit then $full else
+        ($limit - ($note | length) - 2) as $budget
+        | (shrink($budget) | render) as $short
+        | (if ($short | length) <= $budget then $short else $short[:$budget - 1] + "\n" end)
+          + "\n" + $note + "\n"
+      end'
+}
+
+# @description Handle a failed CI run: create or update the PR's failure issue.
+# @exitcode 0 the issue was written, or the PR is gone or closed
+function open_cmd() {
+  require_env GITHUB_REPOSITORY RUN_ID RUN_URL HEAD_BRANCH RUN_CONCLUSION
+  require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
+  require_format RUN_ID '^[0-9]+$' 'a number'
+  require_format RUN_CONCLUSION '^(failure|timed_out|startup_failure)$' 'failure, timed_out or startup_failure'
+  LOG_TAIL_LINES="${LOG_TAIL_LINES:-60}"
+  require_format LOG_TAIL_LINES '^[1-9][0-9]*$' 'a positive number'
+
+  find_pr > "${WORK_DIR}/pr.json"
+  if [[ ! -s "${WORK_DIR}/pr.json" ]]; then
+    log 'no PR for this branch; nothing to do'
+    return 0
+  fi
+  local pr_number pr_state
+  pr_number="$(jq --raw-output '.number' "${WORK_DIR}/pr.json")"
+  pr_state="$(jq --raw-output '.state' "${WORK_DIR}/pr.json")"
+  if [[ "${pr_state}" != 'open' ]]; then
+    log "PR #${pr_number} is ${pr_state}; nothing to do"
+    return 0
+  fi
+
+  failed_jobs > "${WORK_DIR}/jobs.json"
+  local -i job_count i
+  job_count="$(jq '.failed | length' "${WORK_DIR}/jobs.json")"
+  mkdir "${WORK_DIR}/jobs"
+  for ((i = 0; i < job_count; i++)); do
+    local job_file
+    job_file="${WORK_DIR}/jobs/$(printf '%04d' "${i}")"
+    jq --compact-output --argjson i "${i}" '.failed[$i]' "${WORK_DIR}/jobs.json" > "${job_file}.json"
+    # A missing log degrades one section rather than losing the whole issue.
+    if ! job_log_tail "$(jq --raw-output '.id' "${job_file}.json")" > "${job_file}.log"; then
+      log "could not fetch the log of job $(jq --raw-output '.id' "${job_file}.json")"
+      printf '(The log could not be fetched; see the run.)\n' > "${job_file}.log"
+    fi
+    jq --compact-output --rawfile log "${job_file}.log" '{name, conclusion, log: $log}' \
+      "${job_file}.json" > "${job_file}.job.json"
+  done
+
+  local existing count=1
+  existing="$(find_issue "${pr_number}")"
+  if [[ -n "${existing}" ]]; then
+    count="$(jq '.count + 1' <<< "${existing}")"
+  fi
+
+  pr_updates_table < "${WORK_DIR}/pr.json" > "${WORK_DIR}/updates.md"
+  local failed_at
+  failed_at="$(date --utc '+%Y-%m-%dT%H:%M:%SZ')"
+  shopt -s nullglob
+  local -a job_docs=("${WORK_DIR}/jobs/"*.job.json)
+  shopt -u nullglob
+  { cat "${WORK_DIR}/pr.json" "${job_docs[@]}"; } \
+    | jq --null-input --compact-output \
+      --slurpfile started "${WORK_DIR}/jobs.json" --rawfile updates "${WORK_DIR}/updates.md" \
+      --argjson count "${count}" --arg run_url "${RUN_URL}" \
+      --arg conclusion "${RUN_CONCLUSION}" --arg failed_at "${failed_at}" '
+      [inputs] as $docs
+      | { pr: ($docs[0] | {number, html_url}), count: $count,
+          updates: ($updates | sub("\n$"; "")), started: $started[0].started,
+          run: {url: $run_url, conclusion: $conclusion, failed_at: $failed_at},
+          jobs: $docs[1:] }' \
+    | render_body > "${WORK_DIR}/body.md"
+
+  local title
+  title="$(jq --raw-output --argjson limit "${TITLE_LIMIT}" '
+    "Renovate PR #\(.number) failed CI: \(.title)"
+    | if length > $limit then .[:$limit - 1] + "…" else . end' "${WORK_DIR}/pr.json")"
+
+  if [[ -n "${existing}" ]]; then
+    local issue_number
+    issue_number="$(jq --raw-output '.number' <<< "${existing}")"
+    jq --null-input --arg title "${title}" --rawfile body "${WORK_DIR}/body.md" \
+      '{title: $title, body: $body}' \
+      | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
+    log "updated issue #${issue_number} for PR #${pr_number} (failure ${count})"
+    return 0
+  fi
+
+  ensure_label "${DEPENDENCIES_LABEL}" '0366d6' 'Dependency updates'
+  ensure_label "${FAILURE_LABEL}" 'd73a4a' 'A Renovate PR whose CI failed'
+  jq --null-input --arg title "${title}" --rawfile body "${WORK_DIR}/body.md" \
+    --arg dependencies "${DEPENDENCIES_LABEL}" --arg failure "${FAILURE_LABEL}" \
+    '{title: $title, body: $body, labels: [$dependencies, $failure]}' \
+    | gh_api --method POST "repos/${GITHUB_REPOSITORY}/issues" --input - > /dev/null
+  log "created failure issue for PR #${pr_number}"
+}
+
+# @description Handle a closed PR: record the outcome and close its failure
+#              issue, if one is open.
+# @exitcode 0 the issue was closed, or none was open
+function close_cmd() {
+  require_env GITHUB_REPOSITORY PR_NUMBER PR_MERGED
+  require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
+  require_format PR_NUMBER '^[0-9]+$' 'a number'
+  require_format PR_MERGED '^(true|false)$' 'true or false'
+
+  local existing
+  # PR_NUMBER comes from the environment, checked by require_env above.
+  # shellcheck disable=SC2153
+  existing="$(find_issue "${PR_NUMBER}")"
+  if [[ -z "${existing}" ]]; then
+    log "no open failure issue for PR #${PR_NUMBER}; nothing to do"
+    return 0
+  fi
+
+  local outcome='closed without merging' reason='not_planned'
+  if [[ "${PR_MERGED}" == 'true' ]]; then
+    outcome='merged'
+    reason='completed'
+  fi
+  local issue_number
+  issue_number="$(jq --raw-output '.number' <<< "${existing}")"
+  jq --compact-output --arg outcome "${outcome}" --arg reason "${reason}" '{
+      state: "closed", state_reason: $reason,
+      body: ((.body // "" | sub("\\s+$"; "")) + "\n\n**Outcome:** \($outcome)\n")
+    }' <<< "${existing}" \
+    | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
+  log "closed issue #${issue_number} for PR #${PR_NUMBER} (${outcome})"
+}
+
+function main() {
+  local -r subcommand="${1:-}"
+  case "${subcommand}" in
+    open | close) ;;
+    *) usage_error "unknown subcommand: ${subcommand:-<none>}" ;;
+  esac
+  if (($# > 1)); then
+    usage_error 'too many arguments'
+  fi
+
+  WORK_DIR="$(mktemp --directory)"
+  readonly WORK_DIR
+  trap 'rm --recursive --force -- "${WORK_DIR}"' EXIT
+
+  "${subcommand}_cmd"
+}
+
+main "$@"

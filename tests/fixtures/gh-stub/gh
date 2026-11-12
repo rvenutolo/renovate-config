@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+
+# @description A stand-in for `gh api` that serves canned responses from a
+#              fixture directory and records every call, so the BATS suite can
+#              drive scripts/renovate-failure-issue with no network and no
+#              token.
+#
+#              `gh api [--method M] <path> ...` maps to the response file
+#              `${GH_STUB_DIR}/<M>/<path>.json`, with M defaulting to GET, every
+#              `/` in the path replaced by `__` and the `?query` stripped. The
+#              file is printed to stdout. A missing file is a 404: stderr gets
+#              `gh: Not Found (HTTP 404)` and the stub exits 1. A sibling
+#              `<path>.status` file holding an HTTP status of 400 or more turns
+#              the response into that error instead: the file still goes to
+#              stdout, as real gh prints an error body, and stderr gets
+#              `gh: HTTP error (HTTP <status>)`.
+#
+#              Each call appends to `${GH_STUB_DIR}/calls.log` a
+#              `CALL <M> <path with query>` line, an `ARGV:` line and, when the
+#              call passes `--input -`, its stdin. That stdin is also saved
+#              whole to `${GH_STUB_DIR}/requests/<seq>-<M>-<mapped path>.json`
+#              so a test can parse a request body without splitting the log.
+#
+#              Any subcommand other than `api`, or a flag the stub does not
+#              know, exits 2: a script that drifted onto a surface the stub
+#              does not model must fail loudly, not get an empty answer.
+# @arg $@ args the `gh` command line
+# @stdout the canned response
+# @stderr the `gh: ... (HTTP <status>)` line on an error response, or the
+#         stub's own complaint about an unmodeled call
+# @exitcode 0 a canned success response was served
+# @exitcode 1 the response is an HTTP error, a 404 included
+# @exitcode 2 the call is outside what the stub models, or GH_STUB_DIR is unset
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+# @description Report a call the stub does not model and exit 2.
+# @arg $1 message what was unexpected
+# @stderr the `[gh-stub] <message>` line
+# @exitcode 2 always
+function unmodeled() {
+  printf '[gh-stub] %s\n' "$1" >&2
+  exit 2
+}
+
+function main() {
+  if [[ -z "${GH_STUB_DIR:-}" ]]; then
+    unmodeled 'GH_STUB_DIR is not set'
+  fi
+  if [[ "${1:-}" != 'api' ]]; then
+    unmodeled "unmodeled subcommand: ${1:-<none>}"
+  fi
+  shift
+
+  local -a argv=("$@")
+  local method='GET' path='' input=''
+  while (($# > 0)); do
+    case "$1" in
+      --method | -X)
+        method="$2"
+        shift 2
+        ;;
+      --method=*) method="${1#*=}" && shift ;;
+      --input)
+        input="$2"
+        shift 2
+        ;;
+      --input=*) input="${1#*=}" && shift ;;
+      --paginate | --slurp | --silent) shift ;;
+      -*) unmodeled "unmodeled flag: $1" ;;
+      *)
+        if [[ -n "${path}" ]]; then
+          unmodeled "second positional argument: $1"
+        fi
+        path="$1"
+        shift
+        ;;
+    esac
+  done
+  if [[ -z "${path}" ]]; then
+    unmodeled 'no endpoint path given'
+  fi
+  if [[ -n "${input}" && "${input}" != '-' ]]; then
+    unmodeled "only --input - is modeled, got: ${input}"
+  fi
+
+  local mapped="${path%%\?*}"
+  mapped="${mapped//\//__}"
+
+  local -r log="${GH_STUB_DIR}/calls.log"
+  local -r requests="${GH_STUB_DIR}/requests"
+  mkdir --parents "${requests}"
+  local seq
+  seq="$(find "${requests}" -mindepth 1 -maxdepth 1 -name '*.json' | wc --lines)"
+  {
+    printf 'CALL %s %s\n' "${method}" "${path}"
+    printf 'ARGV:'
+    printf ' %s' "${argv[@]}"
+    printf '\n'
+  } >> "${log}"
+  if [[ "${input}" == '-' ]]; then
+    local -r request="${requests}/$(printf '%03d' "${seq}")-${method}-${mapped}.json"
+    cat > "${request}"
+    cat "${request}" >> "${log}"
+    printf '\n' >> "${log}"
+  fi
+
+  local -r response="${GH_STUB_DIR}/${method}/${mapped}.json"
+  local -r status_file="${GH_STUB_DIR}/${method}/${mapped}.status"
+  if [[ ! -f "${response}" ]]; then
+    printf 'gh: Not Found (HTTP 404)\n' >&2
+    exit 1
+  fi
+  cat "${response}"
+  if [[ -f "${status_file}" ]]; then
+    local status
+    status="$(< "${status_file}")"
+    if ((status >= 400)); then
+      printf 'gh: HTTP error (HTTP %s)\n' "${status}" >&2
+      exit 1
+    fi
+  fi
+}
+
+main "$@"
