@@ -94,15 +94,29 @@ run, and a newer event would replace a pending close.
 
 ## Adopting it in a repo
 
-1. Copy `examples/renovate.json5` to the repository root as `renovate.json5`.
+1. Copy `examples/renovate.json5` to the repository root as `renovate.json5`,
+   and delete any other Renovate config: `renovate.json`,
+   `.github/renovate.json`, `.github/renovate.json5`, `.renovaterc`,
+   `.renovaterc.json`, `.renovaterc.json5` or a `renovate` key in
+   `package.json`. Renovate reads only the first config file it finds, so a
+   leftover one can take precedence and the preset is never applied.
 2. Copy `examples/renovate-failure-issue.yml` to
    `.github/workflows/renovate-failure-issue.yml`.
 3. Set the version. The examples carry placeholders (`#v0.0.0`, and an
    all-zero SHA with `# v0.0.0`), so replace them when copying: use the latest
    release tag in the `extends` line, and in both `uses:` lines of the workflow
-   that release's commit SHA with the tag in a trailing comment. From then on
-   Renovate keeps the pins current in the consumer. (Only in this repo's own
-   `examples/` does Renovate replace the placeholders, after the first tag.)
+   that release's commit SHA with the tag in a trailing comment. Release tags
+   are signed and therefore annotated, so take the SHA of the commit the tag
+   points to, not of the tag object:
+
+   ```bash
+   git rev-parse 'vX.Y.Z^{commit}'
+   ```
+
+   From then on Renovate keeps the pins current in the consumer. (Only in this
+   repo's own `examples/` does Renovate replace the placeholders, after the
+   first tag.)
+
 4. In the workflow, change `workflows: [ci]` to the name of the repository's
    own CI workflow.
 5. Add repo-specific settings under `packageRules` and elsewhere in
@@ -143,8 +157,9 @@ For each consuming repository:
 - **Actions allowlist.** If the repository restricts allowed actions, the list
   must include:
   - `rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@*`
-  - `actions/*`
-  - `step-security/harden-runner`
+  - `step-security/harden-runner@*`
+  - `actions/checkout@*`, or the "Allow actions created by GitHub" setting,
+    which allows every `actions/*` action
 
   An action outside the allowlist makes a workflow fail at startup.
 
