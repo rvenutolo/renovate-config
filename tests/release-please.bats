@@ -57,8 +57,10 @@ function yaml_assert() {
   jq --exit-status '.packages | keys == ["."] and .["."]["release-type"] == "simple"' "${CONFIG}" > /dev/null
 }
 
-@test "release-please config: first release is 1.0.0" {
-  jq --exit-status '.packages["."]["release-as"] == "1.0.0"' "${CONFIG}" > /dev/null
+@test "release-please config: the version is never pinned" {
+  # A release-as pin overrides the commits and would propose the same version
+  # on every release PR; versions come from conventional commits.
+  jq --exit-status '.packages["."] | has("release-as") | not' "${CONFIG}" > /dev/null
 }
 
 # @description Assert a release-please manifest maps only the root package,
