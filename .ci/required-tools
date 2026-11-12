@@ -44,6 +44,11 @@ git
 # scripts/renovate-failure-issue builds and reads its GitHub API payloads with
 # it, and the BATS tests inspect JSON with it
 jq
+# tests/workflows.bats converts the workflow YAML to JSON with it
+yq
+# tests/workflows.bats parses .github/renovate.json5 with it; yq has no JSON5
+# reader
+pyjson5
 # the task runner the .justfile documents; .ci/run-lint-checks verifies its
 # formatting with `just --fmt`
 just

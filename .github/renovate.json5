@@ -4,4 +4,12 @@
   // always runs the current preset. Renovate's renovate-config manager skips
   // unpinned references, so nothing tries to bump this line.
   extends: ['local>rvenutolo/renovate-config'],
+  // Renovate's default managers do not look in examples/. Without these, the
+  // copyable examples would keep pointing at the release they were written for
+  // while every consumer moved on.
+  //
+  // The example consumer config's tag-pinned extends line.
+  'renovate-config': { managerFilePatterns: ['/^examples/renovate\\.json5$/'] },
+  // The example caller workflow's SHA-pinned reusable-workflow reference.
+  'github-actions': { managerFilePatterns: ['/^examples/.+\\.ya?ml$/'] },
 }

@@ -1,0 +1,77 @@
+name: renovate-failure-issue
+# Called from each consuming repo's caller workflow (see examples/), never run
+# here directly. Every action below must also be on each consumer's Actions
+# allowlist, which is why it uses only actions/* and harden-runner.
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: '`open` after a failed CI run on a Renovate branch, `close` when a Renovate PR closes'
+        type: string
+        required: true
+      run-id:
+        description: The failed run's id (open)
+        type: string
+        required: false
+      run-url:
+        description: The failed run's URL (open)
+        type: string
+        required: false
+      head-branch:
+        description: The failed run's head branch (open)
+        type: string
+        required: false
+      run-conclusion:
+        description: The failed run's conclusion (open)
+        type: string
+        required: false
+      pr-number:
+        description: The closed PR's number (close)
+        type: string
+        required: false
+      pr-merged:
+        description: '`true` or `false`, whether the closed PR was merged (close)'
+        type: string
+        required: false
+jobs:
+  # No permissions block, at either level, hence the ignore: a called workflow's
+  # jobs inherit the calling job's grant and may only narrow it, and the open
+  # and close callers grant different sets (only open needs actions: read, for
+  # the job logs). A job here requesting more than one caller grants would fail
+  # that caller at startup. The caller example grants each job the minimum.
+  issue:  # zizmor: ignore[excessive-permissions]
+    name: issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-sudo: true
+          # TODO: confirm on a real failure that job logs still download; the
+          # logs endpoint answers with a redirect to a host outside this list,
+          # and the script then files the issue without the log tail.
+          allowed-endpoints: >-
+            api.github.com:443 github.com:443 codeload.github.com:443
+      # A called workflow runs in the caller's checkout, so the script is
+      # fetched from this repository at the exact commit the caller pinned.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .renovate-config
+          sparse-checkout: scripts
+          persist-credentials: false
+      - name: Open, update or close the failure issue
+        # Every caller value is untrusted (branch names come from whoever can
+        # push one), so each reaches the script through env, never the run text.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+          RUN_ID: ${{ inputs.run-id }}
+          RUN_URL: ${{ inputs.run-url }}
+          HEAD_BRANCH: ${{ inputs.head-branch }}
+          RUN_CONCLUSION: ${{ inputs.run-conclusion }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          PR_MERGED: ${{ inputs.pr-merged }}
+        run: .renovate-config/scripts/renovate-failure-issue "${MODE}"

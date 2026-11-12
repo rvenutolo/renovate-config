@@ -27,7 +27,8 @@ REPO_DIR="$(git rev-parse --show-toplevel)"
 readonly REPO_DIR
 
 # The Renovate configs the validator step checks, relative to the repo root:
-# the shared preset itself and this repo's own consumer config.
+# the shared preset itself, the example consumer config shipped in examples/
+# and this repo's own consumer config.
 #
 # .github/renovate.json5 extends this repo's own preset through `local>`. The
 # validator checks only the file's shape and never resolves `extends`, so the
@@ -36,6 +37,7 @@ readonly REPO_DIR
 # call for it. No skip option is needed.
 readonly RENOVATE_CONFIGS=(
   'default.json'
+  'examples/renovate.json5'
   '.github/renovate.json5'
 )
 
@@ -142,15 +144,22 @@ function main() {
     rc=1
   fi
 
+  # examples/ holds caller workflows shipped to consumers. Neither actionlint
+  # nor zizmor discovers them on its own -- both look only for .github/workflows
+  # -- so they are named file by file. Tracked files only, the same set
+  # .ci/check-uses-sha-pinned reads, and an explicit list rather than a glob: an
+  # unmatched glob reaches the tool as a literal path, and no example workflow
+  # at all is a valid state for the tree, not a failure.
+  local -a example_workflows=()
+  mapfile -t example_workflows < <(git -C "${REPO_DIR}" ls-files --full-name 'examples/*.yml')
+
   log 'running actionlint'
   # A missing workflows directory is a failure, not a skip: the repo's CI is
   # defined there, and a gate that finds nothing to read has looked at nothing.
   if [[ -d "${REPO_DIR}/.github/workflows" ]]; then
     actionlint || rc=1
-    # examples/ holds caller workflows shipped to consumers; actionlint only
-    # discovers .github/workflows on its own, so name them explicitly.
-    if [[ -d "${REPO_DIR}/examples" ]]; then
-      actionlint "${REPO_DIR}"/examples/*.yml || rc=1
+    if ((${#example_workflows[@]} > 0)); then
+      (cd "${REPO_DIR}" && actionlint "${example_workflows[@]}") || rc=1
     fi
   else
     log 'no .github/workflows directory found - this is a failure, not a clean pass'
@@ -188,10 +197,10 @@ function main() {
   # for the same reason markdownlint and typos take explicit lists below.
   if [[ -d "${REPO_DIR}/.github" ]]; then
     zizmor --no-online-audits --persona=pedantic "${REPO_DIR}/.github/" || rc=1
-    # examples/ holds caller workflows shipped to consumers, which zizmor must
-    # audit too.
-    if [[ -d "${REPO_DIR}/examples" ]]; then
-      zizmor --no-online-audits --persona=pedantic "${REPO_DIR}/examples/" || rc=1
+    # A directory argument would not do for examples/: zizmor's discovery finds
+    # no .github/workflows under it, collects nothing and exits non-zero.
+    if ((${#example_workflows[@]} > 0)); then
+      (cd "${REPO_DIR}" && zizmor --no-online-audits --persona=pedantic "${example_workflows[@]}") || rc=1
     fi
   else
     log 'no .github directory found - this is a failure, not a clean pass'

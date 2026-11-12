@@ -1,0 +1,9 @@
+# job.workflow_repository and job.workflow_sha are documented job-context
+# properties, but the devShell's actionlint predates them and rejects every use.
+# The ignore is scoped to the one workflow that needs them and to exactly these
+# two property names, so any other undefined-property error still fails.
+# TODO: drop this file once the devShell's actionlint knows these properties.
+paths:
+  .github/workflows/renovate-failure-issue.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

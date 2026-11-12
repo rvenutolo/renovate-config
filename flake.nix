@@ -106,6 +106,11 @@
               }))
             ]))
             jq
+            # tests/workflows.bats reads the workflow YAML with yq. yq-go has no
+            # JSON5 reader, so the json5 package's `pyjson5` reads
+            # .github/renovate.json5 for the same tests.
+            yq-go
+            python3Packages.json5
             git
             just
             # nix.out, NOT a bare `nix`. This package's default output is `dev`,

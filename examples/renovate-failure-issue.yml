@@ -1,0 +1,66 @@
+# Copy to .github/workflows/renovate-failure-issue.yml in a repository that
+# uses the shared Renovate preset. It files an issue when CI fails on a
+# Renovate PR and closes that issue when the PR closes.
+#
+# `workflows: [ci]` must name the repository's own CI workflow.
+#
+# The 0000000... SHA and v0.0.0 below are placeholders until the first release
+# of rvenutolo/renovate-config; Renovate replaces them with the release's commit
+# SHA and tag.
+name: renovate-failure-issue
+on:
+  # Safe despite running with a write token: no PR code is checked out, the
+  # untrusted branch name and run details travel only as reusable-workflow
+  # inputs mapped to env, and the job requires the head to be in this repository.
+  workflow_run:  # zizmor: ignore[dangerous-triggers]
+    workflows: [ci]
+    types: [completed]
+  # pull_request does not fire for a PR with merge conflicts, which is exactly a
+  # superseded or autoclosed Renovate PR. Safe for the same reasons as above: no
+  # PR code is checked out, untrusted values travel as inputs mapped to env, and
+  # the job requires the head to be in this repository.
+  pull_request_target:  # zizmor: ignore[dangerous-triggers]
+    types: [closed]
+permissions: {}
+concurrency:
+  # One run per Renovate branch at a time, so parallel runs cannot file duplicate
+  # issues. Never cancelled: a cancelled close would leave its issue open.
+  group: renovate-failure-issue-${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+jobs:
+  open:
+    # At job level, so non-matching runs are skipped rather than billed. The
+    # same-repository check keeps a fork PR from a branch named renovate/x from
+    # putting attacker-controlled log text into an issue. startup_failure is what
+    # a CI action bump outside the Actions allowlist produces; cancelled is
+    # deliberately ignored.
+    if: |-
+      github.event_name == 'workflow_run'
+      && startsWith(github.event.workflow_run.head_branch, 'renovate/')
+      && github.event.workflow_run.head_repository.full_name == github.repository
+      && contains(fromJSON('["failure", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
+    permissions:
+      issues: write  # create or update the failure issue and its labels
+      actions: read  # list the failed run's jobs and fetch their logs
+      pull-requests: read  # find the PR for the failed branch
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
+    with:
+      mode: open
+      run-id: ${{ format('{0}', github.event.workflow_run.id) }}
+      run-url: ${{ github.event.workflow_run.html_url }}
+      head-branch: ${{ github.event.workflow_run.head_branch }}
+      run-conclusion: ${{ github.event.workflow_run.conclusion }}
+
+  close:
+    if: |-
+      github.event_name == 'pull_request_target'
+      && startsWith(github.event.pull_request.head.ref, 'renovate/')
+      && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      issues: write  # record the outcome in the failure issue and close it
+      pull-requests: read  # read the closed PR's details
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
+    with:
+      mode: close
+      pr-number: ${{ format('{0}', github.event.pull_request.number) }}
+      pr-merged: ${{ format('{0}', github.event.pull_request.merged) }}

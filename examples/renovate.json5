@@ -1,0 +1,19 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  // The shared preset, pinned to a release tag. Renovate proposes each newer
+  // tag in the weekly batch, and a new major in a PR of its own.
+  //
+  // v0.0.0 is a placeholder until the first release of
+  // rvenutolo/renovate-config; Renovate replaces it with the release's tag.
+  extends: ['github>rvenutolo/renovate-config#v0.0.0'],
+  // Settings local to this repository go below and override the preset. A
+  // packageRules entry here is applied after the preset's, so it wins; that is
+  // also where a different minimumReleaseAge belongs.
+  packageRules: [
+    // {
+    //   description: 'Why this repository needs a different rule',
+    //   matchPackageNames: ['some-package'],
+    //   minimumReleaseAge: '14 days',
+    // },
+  ],
+}

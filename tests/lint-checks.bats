@@ -23,8 +23,10 @@ function setup() {
 #
 #              The repo tracks one file of every kind the gate lists except
 #              Markdown, which each case adds or withholds: a bash script, a
-#              Nix file, the root default.json preset, and the .github
-#              directory with its Renovate config and a workflow.
+#              Nix file, the root default.json preset, the example consumer
+#              config examples/renovate.json5, and the .github directory with
+#              its Renovate config and a workflow. No example workflow: the
+#              cases that need one add it.
 #
 #              Every linter is a stub that exits 0, so a case's verdict comes
 #              from the gate's handling of its lists alone, and the suite needs
@@ -43,7 +45,7 @@ function make_lint_fixture() {
     'renovate-config-validator' 'markdownlint-cli2' 'typos' 'editorconfig-checker'
   )
   local linter
-  mkdir --parents "${FIXTURE}/.github/workflows" "${STUB_DIR}"
+  mkdir --parents "${FIXTURE}/.github/workflows" "${FIXTURE}/examples" "${STUB_DIR}"
   for linter in "${linters[@]}"; do
     printf '#!/bin/sh\nexit 0\n' > "${STUB_DIR}/${linter}"
     chmod +x "${STUB_DIR}/${linter}"
@@ -52,6 +54,7 @@ function make_lint_fixture() {
   printf '{ }\n' > "${FIXTURE}/flake.nix"
   printf '{}\n' > "${FIXTURE}/default.json"
   printf '{}\n' > "${FIXTURE}/.github/renovate.json5"
+  printf '{}\n' > "${FIXTURE}/examples/renovate.json5"
   printf 'on: push\n' > "${FIXTURE}/.github/workflows/ci.yml"
   git -C "${FIXTURE}" init --quiet
   git -C "${FIXTURE}" add --all
@@ -149,6 +152,49 @@ function gate_in_fixture() {
   assert_line --partial -- '--no-global --strict'
   assert_line --partial -- 'default.json'
   assert_line --partial -- '.github/renovate.json5'
+  assert_line --partial -- 'examples/renovate.json5'
+}
+
+@test "lint checks: a missing examples/renovate.json5 is a failure" {
+  printf '# Title\n' > "${FIXTURE}/README.md"
+  git -C "${FIXTURE}" add -- 'README.md'
+  git -C "${FIXTURE}" rm --quiet --force -- 'examples/renovate.json5'
+  run --separate-stderr gate_in_fixture
+  assert_failure 1
+  [[ "${stderr}" == *'no examples/renovate.json5 found - this is a failure, not a clean pass'* ]]
+}
+
+@test "lint checks: tracked example workflows reach actionlint and zizmor by file name" {
+  # Neither tool discovers examples/ on its own, and zizmor given the bare
+  # directory collects nothing and fails, so each file must be named.
+  local -r actionlint_log="${BATS_TEST_TMPDIR}/actionlint.log"
+  local -r zizmor_log="${BATS_TEST_TMPDIR}/zizmor.log"
+  printf '# Title\n' > "${FIXTURE}/README.md"
+  printf 'on: push\n' > "${FIXTURE}/examples/caller.yml"
+  git -C "${FIXTURE}" add -- 'README.md' 'examples/caller.yml'
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "${actionlint_log}" > "${STUB_DIR}/actionlint"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "${zizmor_log}" > "${STUB_DIR}/zizmor"
+  run --separate-stderr gate_in_fixture
+  assert_success
+  run cat "${actionlint_log}"
+  assert_line 'examples/caller.yml'
+  run cat "${zizmor_log}"
+  assert_line --regexp ' examples/caller\.yml$'
+  refute_line --regexp 'examples/?$'
+}
+
+@test "lint checks: an examples/ directory with no workflow passes no path to actionlint or zizmor" {
+  # An unmatched glob would reach the tool as a literal `examples/*.yml`.
+  local -r actionlint_log="${BATS_TEST_TMPDIR}/actionlint.log"
+  local -r zizmor_log="${BATS_TEST_TMPDIR}/zizmor.log"
+  printf '# Title\n' > "${FIXTURE}/README.md"
+  git -C "${FIXTURE}" add -- 'README.md'
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "${actionlint_log}" > "${STUB_DIR}/actionlint"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "${zizmor_log}" > "${STUB_DIR}/zizmor"
+  run --separate-stderr gate_in_fixture
+  assert_success
+  run cat "${actionlint_log}" "${zizmor_log}"
+  refute_output --partial 'examples'
 }
 
 @test "lint checks: no tracked Nix file is a failure, not a clean pass" {
