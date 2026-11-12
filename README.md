@@ -105,9 +105,8 @@ run, and a newer event would replace a pending close.
 3. Set the version. The examples carry placeholders (`#v0.0.0`, and an
    all-zero SHA with `# v0.0.0`), so replace them when copying: use the latest
    release tag in the `extends` line, and in both `uses:` lines of the workflow
-   that release's commit SHA with the tag in a trailing comment. Release tags
-   are signed and therefore annotated, so take the SHA of the commit the tag
-   points to, not of the tag object:
+   that release's commit SHA with the tag in a trailing comment. Take the SHA of
+   the commit the tag points to, which also holds if the tag is annotated:
 
    ```bash
    git rev-parse 'vX.Y.Z^{commit}'
@@ -115,7 +114,7 @@ run, and a newer event would replace a pending close.
 
    From then on Renovate keeps the pins current in the consumer. (Only in this
    repo's own `examples/` does Renovate replace the placeholders, after the
-   first tag.)
+   first release.)
 
 4. In the workflow, change `workflows: [ci]` to the name of the repository's
    own CI workflow.
@@ -174,20 +173,27 @@ For each consuming repository:
 
 ## Releasing
 
-Releases are tagged by hand.
+Releases are cut by [release-please](https://github.com/googleapis/release-please)
+(`.github/workflows/release-please.yml`, `release-please-config.json`,
+`.release-please-manifest.json`).
 
-1. On `main`, run `./.ci/in-devshell ./run-all-checks` (or `just check`) and
-   make sure it passes.
-2. Create a signed tag and push it:
-
-   ```bash
-   git tag --sign vX.Y.Z
-   git push origin vX.Y.Z
-   ```
-
+1. On every push to `main`, release-please keeps one release PR open. It bumps
+   the version from the conventional commits since the last release: `fix:` is a
+   patch, `feat:` a minor, and `!` or a `BREAKING CHANGE:` footer a major. It
+   also updates `CHANGELOG.md` and `version.txt`. Other types, including
+   Renovate's `chore(deps)` updates to this repo's own tooling, cut no release.
+2. Merging the release PR tags `vX.Y.Z` and publishes a GitHub release.
 3. Consumers pick the release up through Renovate in their next window; this
    repo's own releases skip the release age. In this repo's `examples/`, Renovate
-   replaces the placeholder tag and SHA after the first tag.
+   replaces the placeholder tag and SHA after the first release.
+
+release-please runs as a GitHub App, not with the workflow token: a PR opened by
+the workflow token never triggers CI, so the required `ci-ok` check could never
+pass. The app needs **Contents**, **Pull requests** and **Issues** read and
+write, and is installed on this repository only. Its client ID is the repository
+variable `RELEASE_APP_CLIENT_ID` and its private key the repository secret
+`RELEASE_APP_PRIVATE_KEY`. The workflow also needs
+`googleapis/release-please-action@*` in this repository's Actions allowlist.
 
 ## Known gaps
 
