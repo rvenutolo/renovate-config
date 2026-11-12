@@ -163,3 +163,15 @@ function caller_if() {
     and (.["github-actions"].managerFilePatterns | index("/^examples/.+\\.ya?ml$/") != null)' \
     <<< "${json}" > /dev/null
 }
+
+@test "caller example: each pinned uses: line is exempt from yamllint line-length" {
+  # A full workflow path plus a 40-character SHA and tag comment runs past
+  # 120 characters, so a consumer's yamllint would reject the copied file.
+  local -r pinned='^ *uses: rvenutolo/renovate-config/'
+  local -r exempt='^ *# yamllint disable-line rule:line-length'
+  local uses_lines exempt_lines
+  uses_lines="$(grep --count --extended-regexp -- "${pinned}" "${CALLER}")"
+  exempt_lines="$(grep --before-context=1 --extended-regexp -- "${pinned}" "${CALLER}" | grep --count --extended-regexp -- "${exempt}" || true)"
+  [[ "${uses_lines}" -eq 2 ]]
+  [[ "${exempt_lines}" -eq "${uses_lines}" ]]
+}
