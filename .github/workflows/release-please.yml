@@ -1,0 +1,47 @@
+name: release-please
+# Keeps one release PR open from the conventional commits on main, and tags
+# vX.Y.Z with a GitHub release when that PR merges. Only feat, fix and breaking
+# changes bump the version; this repo's own chore(deps) updates never cut a
+# release, so consumers are not bumped for tooling churn.
+on:
+  push:
+    branches: [main]
+permissions: {}
+concurrency:
+  # Two quick merges must not run release-please side by side against the same
+  # release branch; the later run waits and sees both commits.
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Everything goes through the app token below. The workflow token is not
+    # used: a release PR it opened would never trigger CI, so the required
+    # ci-ok check could never pass.
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-sudo: true
+          allowed-endpoints: >-
+            api.github.com:443
+      - name: Mint a token for the release app
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # release-please writes the release branch, tags and releases
+          # (contents), opens the release PR (pull-requests) and labels it
+          # (issues). Nothing else.
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
