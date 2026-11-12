@@ -36,7 +36,8 @@
 # @env PR_NUMBER, PR_MERGED the closed PR, for `close`; PR_MERGED is `true` or
 #      `false`
 # @env LOG_TAIL_LINES optional, how many trailing lines of each failed job's
-#      log to include; default 60
+#      log to include, ANSI escape sequences stripped; default 150. The body
+#      is shortened further when it would exceed GitHub's size limit
 # @stderr a `[<script>] <message>` line per action taken or skipped, gh's own
 #         error output, the usage line; the ERR trap's
 #         `[<script>] ERROR: ...` report when a command fails
@@ -150,13 +151,17 @@ function failed_jobs() {
       }'
 }
 
-# @description Print the last LOG_TAIL_LINES lines of one job's log.
+# @description Print the last LOG_TAIL_LINES lines of one job's log, without
+#              ANSI escape sequences: tools color their CI output, and the
+#              codes would show as noise in the issue.
 # @arg $1 id the job id
 # @stdout the log tail
 # @exitcode 1 the log could not be fetched
 function job_log_tail() {
   local -r id="$1"
-  gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${id}/logs" | tail --lines="${LOG_TAIL_LINES}"
+  gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${id}/logs" \
+    | tail --lines="${LOG_TAIL_LINES}" \
+    | LC_ALL=C sed --regexp-extended 's#\x1b\[[0-?]*[ -/]*[@-~]##g'
 }
 
 # @description Print the updates table from a Renovate PR body: the text after
@@ -303,7 +308,7 @@ function open_cmd() {
   require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
   require_format RUN_ID '^[0-9]+$' 'a number'
   require_format RUN_CONCLUSION '^(failure|timed_out|startup_failure)$' 'failure, timed_out or startup_failure'
-  LOG_TAIL_LINES="${LOG_TAIL_LINES:-60}"
+  LOG_TAIL_LINES="${LOG_TAIL_LINES:-150}"
   require_format LOG_TAIL_LINES '^[1-9][0-9]*$' 'a positive number'
 
   find_pr > "${WORK_DIR}/pr.json"

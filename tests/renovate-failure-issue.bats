@@ -395,6 +395,43 @@ function assert_no_comment_calls() {
   assert_failure
 }
 
+@test "open: log tail defaults to 150 lines" {
+  stub_pr open
+  LOG_LINES=500 stub_jobs '11:checks:failure'
+  stub_labels_exist
+  stub_issues '[]'
+  stub_response POST 'repos/o/r/issues' '{"number":42}'
+  run "${SCRIPT}" open
+  assert_success
+  local body n
+  body="$(request_body POST repos/o/r/issues)"
+  for n in 351 425 500; do
+    grep --quiet --fixed-strings --line-regexp "checks log line ${n}" <<< "${body}" \
+      || fail "log line ${n} missing"
+  done
+  run grep --fixed-strings --line-regexp 'checks log line 350' <<< "${body}"
+  assert_failure
+}
+
+@test "open: ANSI escape sequences are stripped from log tails" {
+  stub_pr open
+  stub_jobs '11:checks:failure'
+  stub_response GET 'repos/o/r/actions/jobs/11/logs' \
+    "$(printf '%s\n' $'\e[31mRED_MARKER\e[0m' $'\e[1;32mBOLD_GREEN_MARKER\e[m' $'\e[2Kcleared\e[?25h')"
+  stub_labels_exist
+  stub_issues '[]'
+  stub_response POST 'repos/o/r/issues' '{"number":42}'
+  run "${SCRIPT}" open
+  assert_success
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  grep --quiet --fixed-strings --line-regexp 'RED_MARKER' <<< "${body}" || fail 'RED_MARKER line not clean'
+  grep --quiet --fixed-strings --line-regexp 'BOLD_GREEN_MARKER' <<< "${body}" \
+    || fail 'BOLD_GREEN_MARKER line not clean'
+  grep --quiet --fixed-strings --line-regexp 'cleared' <<< "${body}" || fail 'cleared line not clean'
+  [[ "${body}" != *$'\e'* ]] || fail 'an escape character reached the body'
+}
+
 @test "open: a log containing a code fence cannot close the block early" {
   stub_pr open
   stub_jobs '11:checks:failure'

@@ -59,7 +59,8 @@ issue is labeled `dependencies` and `renovate-failure` and contains:
 
 - a link to the PR and the list of updates in it
 - a link to the failed run and the names of the failed jobs
-- the tail of each failed job's log
+- the last 150 lines of each failed job's log, with ANSI color codes removed
+  (shortened further if the issue would exceed GitHub's size limit)
 - how to land a fix
 
 A run with conclusion `failure`, `timed_out` or `startup_failure` counts as a
