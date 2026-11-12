@@ -13,14 +13,20 @@ pinned to a release tag.
   leaves the remaining PRs behind `main`, and only a Renovate run rebases them,
   so a week's chain needs about one run per PR. The hosted app runs each repo
   about every 4 hours, which gives the window roughly 12 runs. Nothing touches a
-  Renovate branch outside the window: a PR that fails CI waits until it is fixed
+  Renovate branch outside the window, except security fixes and a manual rebase
+  request (the PR's rebase checkbox): a PR that fails CI waits until it is fixed
   or until the next window.
 - **Lock-file maintenance** runs Saturday 6pm to Sunday 6pm, so the lock file is
   regenerated once, on top of most of the week's merged updates.
 - **One batch, separate majors.** Every non-major update (minor, patch, pin,
   digest and similar) goes into a single PR named "all non-major dependencies".
-  Each major update gets its own PR. To batch majors too, add `major` to the
-  batch rule's `matchUpdateTypes` in a local `packageRules` entry.
+  Each major update gets its own PR. To batch majors too:
+  - for every consumer, add `major` to the batch rule's `matchUpdateTypes` in
+    this repo's `default.json` and cut a release;
+  - for one repo, add a later local `packageRules` entry with
+    `matchPackageNames: ['*']`, `matchUpdateTypes: ['major']`,
+    `groupName: 'all non-major dependencies'` and
+    `groupSlug: 'all-non-major'`.
 - **Automerge.** Every update type, majors included, merges through GitHub
   auto-merge once CI is green. Branches are rebased whenever they fall behind
   the base branch. There are no PR count limits inside the window.
@@ -81,12 +87,12 @@ fork PRs.
 1. Copy `examples/renovate.json5` to the repository root as `renovate.json5`.
 2. Copy `examples/renovate-failure-issue.yml` to
    `.github/workflows/renovate-failure-issue.yml`.
-3. Set the version: the `extends` line in `renovate.json5` and the pin of both
-   `uses:` lines in the workflow. Use the latest release tag, and for the
-   workflow its commit SHA with the tag in a trailing comment. Both examples
-   carry placeholders (`#v0.0.0`, and an all-zero SHA with `# v0.0.0`) that
-   Renovate replaces after the first release, so after that it keeps them
-   current.
+3. Set the version. The examples carry placeholders (`#v0.0.0`, and an
+   all-zero SHA with `# v0.0.0`), so replace them when copying: use the latest
+   release tag in the `extends` line, and in both `uses:` lines of the workflow
+   that release's commit SHA with the tag in a trailing comment. From then on
+   Renovate keeps the pins current in the consumer. (Only in this repo's own
+   `examples/` does Renovate replace the placeholders, after the first tag.)
 4. In the workflow, change `workflows: [ci]` to the name of the repository's
    own CI workflow.
 5. Add repo-specific settings under `packageRules` and elsewhere in
@@ -115,8 +121,10 @@ rule wins.
 
 - **Opt a package out of the batch:** give it its own `groupName` in a local
   rule, or a different `groupName` to put it in another group.
-- **Anything else** (schedule, automerge, labels) can be overridden by setting
-  the same key in the consumer's `renovate.json5`.
+- **Anything else** (automerge, labels, schedule) can be overridden by setting
+  the same key in the consumer's `renovate.json5`. The lock-file maintenance
+  schedule is a separate key, `lockFileMaintenance.schedule`; overriding
+  `schedule` alone leaves lock-file maintenance on Saturday and Sunday.
 
 ## Prerequisites
 
@@ -153,8 +161,8 @@ Releases are tagged by hand.
    ```
 
 3. Consumers pick the release up through Renovate in their next window; this
-   repo's own releases skip the release age. In this repo's `examples/`, the
-   placeholder tag and SHA are replaced by Renovate after the first tag.
+   repo's own releases skip the release age. In this repo's `examples/`, Renovate
+   replaces the placeholder tag and SHA after the first tag.
 
 ## Known gaps
 
