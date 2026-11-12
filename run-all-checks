@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+
+# @description Run the full local verification gate: the formatting check, the
+#              governance lints, the lint suite, and the BATS suite. Verify-only
+#              -- it never rewrites the tree, which is why `nix fmt` is a
+#              separate step run before it. Exit codes are AGGREGATED rather
+#              than failing fast, so a single run surfaces every failing
+#              category instead of only the first.
+# @noargs
+# @exitcode 0 every check passed
+# @exitcode 1 one or more checks failed
+# @exitcode 2 any arguments at all
+# @exitcode * otherwise the failing git status, when the repository root cannot
+#             be resolved
+# @stderr a `[<script>] <message>` banner before each step, a warning naming
+#         each untracked file, `one or more checks failed` on exit 1, and the
+#         usage line on exit 2; the ERR trap's `[<script>] ERROR: ...` report
+#         when a command fails instead
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+readonly REPO_DIR
+
+# The governance lints, run in this order. One entry per gate, so adding a gate
+# is one line. Each is a script under .ci/ that takes no arguments and exits
+# non-zero on a violation.
+#
+# check-devshell-provides keeps .ci/required-tools and the devShell in step.
+# check-executable-bit and check-shell-shebangs hold every tracked file's mode
+# and shebang to what the lint gate assumes. check-uses-sha-pinned requires
+# every workflow `uses:` to be a commit SHA with a version comment.
+readonly GOVERNANCE_CHECKS=(
+  'check-devshell-provides'
+  'check-executable-bit'
+  'check-shell-shebangs'
+  'check-uses-sha-pinned'
+)
+
+# @description Log a step banner to stderr, in the house format.
+# @arg $1 message the text to log
+# @stderr the `[<script>] <message>` line
+function log() {
+  local -r message="$1"
+  printf '[%s] %s\n' "${0##*/}" "${message}" >&2
+}
+
+# @description Warn when the working tree holds untracked, non-ignored files.
+#              `nix flake check` evaluates the git tree, so an untracked file is
+#              invisible to the formatting gate and passes vacuously. Never
+#              fails the run — blocking on scratch files would be worse.
+# @noargs
+function warn_untracked() {
+  local -a untracked=()
+  mapfile -t untracked < <(git -C "${REPO_DIR}" ls-files --others --exclude-standard)
+  if ((${#untracked[@]} == 0)); then
+    return 0
+  fi
+  log 'untracked files are invisible to nix flake check; git add them:'
+  local file
+  for file in "${untracked[@]}"; do
+    log "  untracked: ${file}"
+  done
+}
+
+# @description Print the usage line and exit 2. Exit 2 rather than 1: 1 is the
+#              gate's verdict, and "you called it wrong" must stay
+#              distinguishable from it. The ERR trap is dropped first
+#              only for symmetry with the verdict returns; exit itself never
+#              fires it.
+# @noargs
+# @stderr the usage line
+# @exitcode 2 always
+function usage() {
+  printf 'usage: %s\n' "${0##*/}" >&2
+  trap - ERR
+  exit 2
+}
+
+function main() {
+  if (($# > 0)); then
+    usage
+  fi
+
+  local rc=0 check
+  warn_untracked
+  log 'running nix flake check (formatting)'
+  nix flake check --no-eval-cache "${REPO_DIR}" || rc=1
+
+  log 'running governance checks'
+  for check in "${GOVERNANCE_CHECKS[@]}"; do
+    "${REPO_DIR}/.ci/${check}" || rc=1
+  done
+
+  log 'running lint checks'
+  "${REPO_DIR}/.ci/run-lint-checks" || rc=1
+
+  log 'running tests'
+  "${REPO_DIR}/run-tests" || rc=1
+
+  if ((rc != 0)); then
+    log 'one or more checks failed'
+  fi
+  # A gate reporting its own verdict is not a crash: drop the ERR trap so the
+  # diagnostics above are the last thing the reader sees.
+  trap - ERR
+  return "${rc}"
+}
+
+main "$@"

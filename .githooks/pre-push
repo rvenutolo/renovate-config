@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+# @description Git pre-push hook. Runs the full local gate inside the devShell
+#              and aborts the push if it fails. One runner rather than a
+#              hand-maintained step list, so the hook, the docs and the justfile
+#              cannot drift apart. Bypass with `git push --no-verify`.
+# @arg $@ args the remote name and URL git passes (the ref/sha pairs arrive on
+#         stdin); this hook uses neither
+# @stderr a `pre-push: <message>` line before the gate runs and one with its
+#         verdict
+# @exitcode 0 the gate passed
+# @exitcode 1 the gate failed, or the devShell wrapper could not start; the push
+#             is aborted
+# @exitcode * otherwise the failing git status; the push is aborted
+
+set -Eeuo pipefail
+# No inherit_errexit: this runs under the host bash, 3.2 on stock macOS, where the option does not exist.
+IFS=$'\n\t'
+
+function main() {
+  local repo_dir
+  repo_dir="$(git rev-parse --show-toplevel)"
+  printf 'pre-push: running the full local gate\n' >&2
+  if ! "${repo_dir}/.ci/in-devshell" "${repo_dir}/run-all-checks"; then
+    printf 'pre-push: gate failed — fix, or rerun with --no-verify to bypass\n' >&2
+    exit 1
+  fi
+  printf 'pre-push: gate passed\n' >&2
+}
+
+main "$@"

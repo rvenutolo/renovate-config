@@ -1,0 +1,18 @@
+# yamlfmt configuration, read from the repo root by the treefmt-driven yamlfmt.
+#
+# max_line_length and pad_line_comments reconcile yamlfmt with
+# `yamllint --strict`, which the gate also runs. Neither relaxes a lint; they
+# make the formatter emit what the linter already demands.
+#
+# max_line_length keeps folded scalars folded: without it yamlfmt re-emits a
+# `>-` scalar as a single long line, tripping yamllint's line-length rule.
+#
+# pad_line_comments defaults to 1, which trips yamllint's `comments` rule
+# (min-spaces-from-content: 2) on every `uses: ...@<sha>  # vX.Y.Z` pin.
+formatter:
+  type: basic
+  max_line_length: 120
+  pad_line_comments: 2
+  # Purely for readability: keep the author's blank lines between jobs, rather
+  # than collapsing a multi-job workflow into one unbroken wall of YAML.
+  retain_line_breaks: true

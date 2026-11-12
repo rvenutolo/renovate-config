@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+flake.lock   linguist-generated
+*.bats       linguist-language=Shell

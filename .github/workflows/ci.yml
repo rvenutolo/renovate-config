@@ -1,0 +1,114 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # The hermetic `checks` job is pinned by flake.lock, but it still depends on
+  # cache.nixos.org, the Nix installer and the GitHub-hosted runner image. A
+  # scheduled run surfaces a breakage in any of them in a week nobody pushed,
+  # instead of on the next PR where it would look like that PR's fault. GitHub
+  # emails the repo owner when a scheduled workflow fails.
+  #
+  # :47 rather than :00 -- on-the-hour cron slots are the most contended on
+  # GitHub's shared scheduler, and therefore the most delayed.
+  schedule:
+    - cron: '47 12 * * 1'
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  # `github.event_name` belongs in this key, not just workflow + ref. A
+  # scheduled run's `github.ref` is refs/heads/main -- indistinguishable from a
+  # push to main -- so without the event name a scheduled run and a push landing
+  # in the same window share a group, and `cancel-in-progress` kills one of
+  # them. With the event name in the key, push still cancels push and a
+  # schedule cannot be cancelled by unrelated traffic.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          allowed-endpoints: >-
+            api.github.com:443 cache.nixos.org:443 channels.nixos.org:443 codeload.github.com:443 github.com:443 hosted-compute-*.githubapp.com:443
+            install.determinate.systems:443 nix-installer20230104193028379800000001.s3.dualstack.us-east-2.amazonaws.com:443
+            nixos.org:443 objects.githubusercontent.com:443 raw.githubusercontent.com:443 releases.nixos.org:443 tarballs.nixos.org:443
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Full history: the commitlint step below lints every commit between
+          # the pull request's base and head.
+          fetch-depth: 0
+          persist-credentials: false
+      # This job runs its own commit, so the local `./` action is the same tree as the repository's action.
+      - uses: ./.github/actions/setup  # zizmor: ignore[self-repository]
+      - name: Run all checks
+        # The interpreter is the flake's bash, not the host's: .ci/in-devshell
+        # runs BEFORE the devShell it creates, so it executes under whatever
+        # bash the host provides, and every gate script relies on
+        # `shopt -s inherit_errexit`, which a bash older than 4.4 lacks.
+        shell: nix develop --command bash -e {0}
+        run: ./.ci/in-devshell ./run-all-checks
+      - name: Lint the pull request's commits
+        # pull_request ONLY: default merge-commit subjects ("Merge pull request
+        # #1 ...") are not conventional and would redden main on the first
+        # merge.
+        #
+        # The devShell's commitlint, the one the commit-msg hook and
+        # tests/commitlint.bats run, so CI cannot judge a message differently;
+        # commitlint.config.mjs also resolves its preset through that
+        # commitlint's NODE_PATH. A step here rather than its own job, so it
+        # shares this job's Nix setup, sudo and egress allowlist.
+        if: github.event_name == 'pull_request'
+        shell: nix develop --command bash -e {0}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./.ci/in-devshell commitlint --from "${BASE_SHA}" --to "${HEAD_SHA}" --verbose
+
+  ci-ok:
+    name: ci-ok
+    # Aggregates every other job: each one feeds it through `needs`, so jobs
+    # can be added, split or renamed here without editing any ruleset that
+    # requires this check.
+    #
+    # always(): without it a failed or cancelled dependency would skip this
+    # job, and a skipped required check counts as passing.
+    if: always()
+    needs:
+      - checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: block
+          disable-sudo: true
+          # No network calls: the job only inspects its own `needs` context.
+          allowed-endpoints: ''
+      - name: Require every needed job to have succeeded
+        # A skipped job, and every cancelled or failed one, fails the check.
+        run: |
+          set -Eeuo pipefail
+          # Assigned on its own line, not read through process substitution:
+          # a jq failure there would leave the loop empty and the job green.
+          results="$(jq --raw-output 'to_entries[] | [.key, .value.result] | @tsv' <<< "${NEEDS_JSON}")"
+          [[ -n "${results}" ]]
+          failed=0
+          while IFS=$'\t' read -r job result; do
+            printf '%s: %s\n' "${job}" "${result}"
+            case "${job}:${result}" in
+              *:success) ;;
+              *) failed=1 ;;
+            esac
+          done <<< "${results}"
+          exit "${failed}"

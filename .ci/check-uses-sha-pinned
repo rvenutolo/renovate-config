@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+
+# @description Assert every `uses:` in every workflow, composite action and
+#              shipped example workflow is pinned to a 40-character commit SHA
+#              and carries a trailing version comment. Local actions (`./.github/...`) are exempt: they
+#              are this repo's own tree, already pinned by the checkout.
+# @noargs
+# @stderr one FAIL line per external uses: that is not SHA-pinned with a version
+#         comment, naming the file and line, and one FAIL line for a scan that
+#         finds no external uses:; an OK line when no workflow file is tracked;
+#         the ERR trap's `[<script>] ERROR: ...` report when a command fails
+#         instead
+# @exitcode 0 every uses: is SHA-pinned with a version comment, or no workflow
+#             file is tracked
+# @exitcode 1 at least one is not, a tracked workflow file is missing or
+#             unreadable, or the workflows hold no external uses: (a broken
+#             scan)
+# @exitcode * otherwise the failing git status, when the repository root cannot
+#             be resolved
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+readonly REPO_DIR
+
+function main() {
+  local rc=0 count=0 file line lineno ref
+  local -a files=()
+  mapfile -t files < <(git -C "${REPO_DIR}" ls-files '.github/workflows/*.yml' '.github/actions/*/action.yml' 'examples/*.yml')
+
+  if ((${#files[@]} == 0)); then
+    # Until the first workflow is tracked there is nothing to pin.
+    printf 'OK: no workflow files tracked yet; nothing to check\n' >&2
+    return 0
+  fi
+
+  for file in "${files[@]}"; do
+    lineno=0
+    while IFS= read -r line; do
+      lineno="$((lineno + 1))"
+      [[ "${line}" =~ ^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*(.*)$ ]] || continue
+      ref="${BASH_REMATCH[1]}"
+      # Local actions are this repo's own tree.
+      [[ "${ref}" == './'* ]] && continue
+      count="$((count + 1))"
+      if [[ ! "${ref}" =~ @[0-9a-f]{40}[[:space:]]*\#[[:space:]]*v?[0-9] ]]; then
+        printf 'FAIL: %s:%s not SHA-pinned with a version comment: %s\n' \
+          "${file}" "${lineno}" "${ref}" >&2
+        rc=1
+      fi
+    done < "${REPO_DIR}/${file}"
+  done
+
+  if ((count == 0)); then
+    printf 'FAIL: workflow files exist but contain no external "uses:" — scan looks broken\n' >&2
+    rc=1
+  fi
+  # A gate reporting its own verdict is not a crash: drop the ERR trap so the
+  # diagnostics above are the last thing the reader sees.
+  trap - ERR
+  return "${rc}"
+}
+
+main "$@"

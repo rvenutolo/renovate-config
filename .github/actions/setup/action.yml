@@ -1,0 +1,55 @@
+name: setup
+# Caller must run harden-runner and actions/checkout before this
+# composite: a local action cannot perform its own initial checkout.
+description: Install Nix and restore the Nix store cache.
+runs:
+  using: composite
+  steps:
+    - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3  # v3.24.1
+      with:
+        # Turns off the installer's diagnostics. They go to
+        # install.determinate.systems, the host the installer is downloaded from,
+        # so the harden-runner allowlist cannot separate them from the download.
+        diagnostic-endpoint: ''
+      env:
+        # Turns off the action's OpenTelemetry export. Its collector,
+        # otel.determinate.systems, is not on harden-runner's egress
+        # allowlist, so every phase of the action, and every `nix` it runs
+        # (which inherits the exporter settings), would wait out a blocked
+        # connection. Nothing reads that telemetry.
+        OTEL_SDK_DISABLED: 'true'
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569  # v7
+      with:
+        # `-v2-` is a generation marker. Garbage collection (below) runs only
+        # when the save phase finds no cache under the primary key, so a cache
+        # saved under a key without the marker is restored and never replaced.
+        # Bump the marker whenever a change to this action must invalidate
+        # every cache it saved.
+        primary-key: nix-${{ runner.os }}-v2-${{ hashFiles('flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-v2-
+        # Collect ALL garbage before saving. Otherwise the cache is the union
+        # of every store the runner restored: a flake.lock bump restores the
+        # previous lock's store through the prefix match, adds the new
+        # closures next to the old ones, and saves the lot, so the cache only
+        # grows.
+        #
+        # `0` rather than a byte ceiling: anything rooted survives GC
+        # regardless (see the step below), so a ceiling could only keep
+        # garbage.
+        gc-max-store-size: 0
+    - name: Root the devShell so garbage collection keeps it
+      # `nix develop` roots nothing: the shell's closure is garbage once the
+      # command exits, and the GC configured above would delete the store
+      # paths the cache exists to carry. A profile is a garbage-collection
+      # root, so `--profile` keeps the runtime closure, and only that, alive
+      # to the save. The gate's later `nix develop` runs reuse the same
+      # derivation.
+      #
+      # RUNNER_TEMP rather than the workspace: a profile symlink under the
+      # checkout would be an untracked file in the tree the gate grades.
+      #
+      # Flake inputs (the nixpkgs source tree among them) are not rooted and
+      # are collected; they are re-fetched from cache.nixos.org, which is
+      # cheaper than restoring the tree's many small files from the tarball.
+      shell: bash
+      run: nix develop --profile "${RUNNER_TEMP}/devshell-profile" --command true

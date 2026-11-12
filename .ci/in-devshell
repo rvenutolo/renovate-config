@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+
+# @description Run a command inside this repo's Nix devShell with a hermetic
+#              environment. The single entrypoint for every hermetic gate:
+#              the git hooks, the .justfile recipes that run a gate, and the CI
+#              steps that run one go through it, so local and CI runs cannot
+#              drift and no gate can silently resolve a tool from the ambient
+#              machine. `nix fmt` stays outside on purpose: it takes its
+#              formatters from the Nix store.
+#
+#              `nix develop --ignore-environment` is what makes the boundary
+#              real: without it the devShell inherits the caller's PATH and an
+#              undeclared dependency keeps resolving from /usr/bin. Because the
+#              environment is wiped, the few variables the gates genuinely need
+#              are re-admitted through the fixed KEEP_VARS allowlist below.
+#
+#              When IN_DEVSHELL is already set the command is run directly, with
+#              no second nix evaluation: the caller is inside the boundary.
+#
+#              Standalone on purpose: it runs before the environment it creates,
+#              so it cannot source a function library. It needs only bash, git
+#              and nix from the host.
+# @arg $@ command the command to run inside the devShell, plus its arguments
+# @stderr the usage line, or the reason the script cannot run
+# @exitcode 0 the wrapped command succeeded
+# @exitcode 1 no command given, not inside a git repo, or the host bash is too old
+# @exitcode * otherwise the wrapped command's exit status, or nix's own when the
+#             devShell cannot be entered
+
+set -Eeuo pipefail
+# This script runs under the HOST bash, before the devShell it creates exists,
+# so the host's version is whatever the machine ships. `shopt -s inherit_errexit`
+# below is a bash 4.4 builtin option: on stock macOS bash 3.2, and on 4.2 or
+# 4.3, the shell aborts with `shopt: inherit_errexit: invalid shell option name`,
+# which tells a coworker running `just check` nothing about what to install.
+# Check first, and say what to do. Must stay ABOVE the `shopt` line it is
+# protecting.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  printf '%s: bash 4.4+ required to run the gate (found %s.%s). On macOS: brew install bash.\n' \
+    "${0##*/}" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" >&2
+  exit 1
+fi
+# Errexit is otherwise off inside every $(...) subshell. The one substitution
+# assigned here, `repo_dir="$(git ...)"`, is tested by its own `if !` and does
+# not depend on this; the option is set so a substitution holding more than one
+# command would still stop at the first failure.
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "\033[0;31m[%s] ERROR: line %s (exit %s): %s\033[0m\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+# `--keep` on an unset variable is silent and harmless, so every name is passed
+# unconditionally rather than set-checked.
+readonly KEEP_VARS=(
+  HOME
+  TERM
+  CI
+  IN_DEVSHELL
+  NIX_SSL_CERT_FILE
+  GITHUB_ACTIONS
+  GITHUB_OUTPUT
+  GITHUB_ENV
+  GITHUB_STEP_SUMMARY
+  GITHUB_WORKSPACE
+  GITHUB_REPOSITORY
+  GITHUB_REF
+  GITHUB_REF_NAME
+  GITHUB_SHA
+  GITHUB_EVENT_NAME
+  GITHUB_TOKEN
+  GH_TOKEN
+  GH_REPO
+  RUNNER_OS
+  RUNNER_TEMP
+)
+
+function main() {
+  if (($# == 0)); then
+    printf 'usage: %s <command> [args...]\n' "${0##*/}" >&2
+    exit 1
+  fi
+
+  # Already inside the boundary: run directly, skip a second nix evaluation.
+  if [[ -n "${IN_DEVSHELL:-}" ]]; then
+    exec "$@"
+  fi
+
+  local repo_dir
+  if ! repo_dir="$(git rev-parse --show-toplevel 2> '/dev/null')"; then
+    printf '%s: not a git repo: %s\n' "${0##*/}" "$(pwd)" >&2
+    exit 1
+  fi
+  readonly repo_dir
+
+  export IN_DEVSHELL=1
+
+  # The flake reference is the repo this script was invoked in, never a relative
+  # path: a gate must evaluate the tree it is grading.
+  local -a nix_args=(develop "${repo_dir}" --ignore-environment)
+  local keep_var
+  for keep_var in "${KEEP_VARS[@]}"; do
+    nix_args+=(--keep "${keep_var}")
+  done
+  nix_args+=(--command)
+
+  exec nix "${nix_args[@]}" "$@"
+}
+
+main "$@"

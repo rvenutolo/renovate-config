@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+
+# @description Assert every tracked file that carries a shebang carries the
+#              canonical one, `#!/usr/bin/env bash`.
+#
+#              This gate exists because .ci/run-lint-checks decides which
+#              extensionless files reach shellcheck and shfmt by comparing
+#              their first line against that exact string. Every bash file it
+#              admits spells it that way, so the lint gate is sound -- but
+#              a script written `#!/bin/bash` or `#!/usr/bin/env -S bash` would
+#              be dropped from BOTH linters with no diagnostic, and the
+#              empty-scan guard in run-lint-checks' `main` fires only when the
+#              list is entirely empty, never when it is one file short.
+#              Rather than teach a function whose whole contract is "print one
+#              path per line" to fail -- it runs inside a process substitution
+#              feeding `mapfile`, so a non-zero return there reaches nobody --
+#              the invariant that makes the exact-string match safe is asserted
+#              here, loudly.
+#
+#              It judges the shebangs that exist and never demands one: a file
+#              that is sourced rather than executed carries none.
+#
+#              *.bats is skipped outright: bats sources those files, they carry
+#              no shebang, and the lint gate admits them by extension.
+#
+#              There is no exemption table. Every script in this repo is bash,
+#              so a shebang naming any other interpreter is a failure to
+#              resolve, not an allowance to declare.
+# @arg $1 dir optional fixture directory, treated as the repo root: the tracked
+#         file list is read from it rather than from the real checkout. It
+#         exists so the bats suite can drive the real matcher over a fabricated
+#         tree -- one where a shebang can be canonical, non-canonical or absent
+#         on purpose -- in milliseconds. Without it the only possible test
+#         would be "exits 0 on the real repo", which a script that
+#         unconditionally returned 0 would also pass.
+# @stderr the usage line on a surplus argument; a FAIL line with indented
+#         explanation for each non-canonical or non-bash shebang; a FAIL line
+#         for an empty scan; the closing OK line when nothing failed; the ERR
+#         trap's `[<script>] ERROR: ...` report when a command fails instead
+# @exitcode 0 every shebang is canonical
+# @exitcode 1 a shebang is non-canonical, or nothing was scanned
+# @exitcode 2 more arguments were given than the script accepts
+# @exitcode * otherwise the failing git status, when no fixture directory is
+#             given and the repository root cannot be resolved
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+# Every positional below is optional, so a surplus argument is a typo -- a
+# misplaced flag, a stray path -- not input. Silently ignoring it would run the
+# check anyway and report success on something nobody asked for. Exit 2 rather
+# than 1: 1 is this script's verdict on what it inspected, and "you called it
+# wrong" must stay distinguishable from "what you pointed me at is wrong". The
+# ERR trap is dropped first only for symmetry with the verdict returns;
+# exit itself never fires it.
+if (($# > 1)); then
+  printf 'usage: %s [dir]\n' "${0##*/}" >&2
+  trap - ERR
+  exit 2
+fi
+
+readonly FIXTURE_DIR="${1:-}"
+
+# In fixture mode the directory IS the repo root, and it must be taken at face
+# value: `git rev-parse --show-toplevel` run from a bats temp directory would
+# either fail or -- worse -- resolve to some enclosing repo, and the suite would
+# then be grading the author's checkout instead of its own fixture.
+if [[ -n "${FIXTURE_DIR}" ]]; then
+  readonly REPO_DIR="${FIXTURE_DIR}"
+else
+  REPO_DIR="$(git rev-parse --show-toplevel)"
+  readonly REPO_DIR
+fi
+
+readonly CANONICAL='#!/usr/bin/env bash'
+
+# @description Report whether a shebang line names bash as its interpreter, in
+#              any spelling.
+#
+#              Word-wise on the basename rather than a substring match, so
+#              `#!/bin/bash`, `#!/usr/local/bin/bash --posix` and
+#              `#!/usr/bin/env -S bash` all count while `#!/usr/bin/bashful`
+#              does not. IFS is set locally: the file-global IFS is newline-tab,
+#              which would leave a space-separated shebang unsplit.
+# @arg $1 shebang the full first line, `#!` included
+# @exitcode 0 the line names bash
+# @exitcode 1 it names something else
+function names_bash() {
+  local -r shebang="$1"
+  local -a words=()
+  local word
+  IFS=$' \t' read -r -a words <<< "${shebang#'#!'}"
+  for word in "${words[@]}"; do
+    if [[ "${word##*/}" == 'bash' ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# @description Grade one tracked file's shebang.
+# @arg $1 path the tracked path, relative to the repo root
+# @arg $2 shebang the file's first line, known to start with `#!`
+# @stderr one FAIL line, plus its remedy, for a shebang that does not grade clean
+# @exitcode 0 canonical
+# @exitcode 1 non-canonical
+function check_shebang() {
+  local -r path="$1"
+  local -r shebang="$2"
+
+  if [[ "${shebang}" == "${CANONICAL}" ]]; then
+    return 0
+  fi
+
+  if names_bash "${shebang}"; then
+    printf 'FAIL: %s has a non-canonical bash shebang %s; use %s\n' \
+      "${path}" "\"${shebang}\"" "\"${CANONICAL}\"" >&2
+    printf '      .ci/run-lint-checks admits an extensionless file into\n' >&2
+    printf '      shellcheck and shfmt only on an exact match of that string,\n' >&2
+    printf '      so any other spelling is silently unlinted.\n' >&2
+    return 1
+  fi
+
+  printf 'FAIL: %s carries the non-bash shebang %s\n' "${path}" "\"${shebang}\"" >&2
+  printf '      Every script in this repo is bash; a file for another\n' >&2
+  printf '      interpreter is never reached by shellcheck or shfmt.\n' >&2
+  return 1
+}
+
+function main() {
+  local rc=0 checked=0 path first_line
+  local -a tracked=()
+  mapfile -t tracked < <(git -C "${REPO_DIR}" ls-files)
+
+  for path in "${tracked[@]}"; do
+    case "${path}" in
+      *.bats) continue ;;
+      *) ;;
+    esac
+    [[ -r "${REPO_DIR}/${path}" ]] || continue
+    # Reset first, then `|| :` rather than `|| first_line=''`: a file whose
+    # only line lacks a trailing newline makes `read` set the variable AND
+    # return 1, and the assignment form would blank the shebang it just read.
+    # An empty file leaves the reset value and is skipped below.
+    first_line=''
+    IFS= read -r first_line < "${REPO_DIR}/${path}" || : # read returns 1 on an unterminated line yet stores it
+    [[ "${first_line}" == '#!'* ]] || continue
+    checked="$((checked + 1))"
+    check_shebang "${path}" "${first_line}" || rc=1
+  done
+
+  # A scan that found nothing would pass everything. Same class of bug as an
+  # empty tool list in check-devshell-provides, and worth one line to make
+  # impossible: every gate, hook and runner in this tree carries a shebang, so
+  # a count of zero means the file list, not the tree, went wrong.
+  if ((checked == 0)); then
+    printf 'FAIL: no tracked file carries a shebang — an empty scan is not a clean pass\n' >&2
+    rc=1
+  fi
+
+  if ((rc == 0)); then
+    printf 'OK: %s shebangs canonical across the tracked tree\n' "${checked}" >&2
+  fi
+  # A gate reporting its own verdict is not a crash: drop the ERR trap so the
+  # diagnostics above are the last thing the reader sees.
+  trap - ERR
+  return "${rc}"
+}
+
+main "$@"

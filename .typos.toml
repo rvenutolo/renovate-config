@@ -1,0 +1,3 @@
+[files]
+# Lock files hold hashes that typos reads as misspelt words.
+extend-exclude = ["flake.lock"]

@@ -1,0 +1,444 @@
+#!/usr/bin/env bash
+
+# @description Two-way drift lint between .ci/required-tools and the devShell.
+#
+#              Forward: every declared tool must actually resolve on PATH inside
+#              the devShell. An EMPTY declaration list fails too, since a scan
+#              that finds nothing must never read as a clean pass. An entry may
+#              carry a trailing `# linux-only` annotation, which the forward
+#              pass honours by skipping the entry off Linux -- for a package
+#              nixpkgs builds on Linux alone, which flake.nix adds
+#              conditionally, so the devShell genuinely does not provide it on
+#              macOS. The skip is printed, not silent: a Darwin run must say out loud what
+#              it did not check. Any OTHER annotation is a hard failure rather
+#              than an ignored comment, because a typo'd `# linux_only` silently
+#              reverting to "required everywhere" is precisely the drift this
+#              lint exists to catch.
+#
+#              Reverse: every devShell package must justify its presence. A
+#              package is justified when either holds:
+#                1. a declared tool resolves on PATH to one of its outputs, or
+#                2. it backs a formatter .treefmt.nix enables -- treefmt runs
+#                   those from the Nix store, never through PATH, so they are
+#                   justified without ever appearing in .ci/required-tools.
+#              Rule 2 is DERIVED from .treefmt.nix rather than a hand-kept
+#              exemption list: enabling a formatter in both files passes with no
+#              edit here, and dropping one from .treefmt.nix while leaving it in
+#              the devShell correctly fails. A hardcoded list would have to be
+#              remembered at exactly the moment it is easiest to forget.
+#
+#              The traps that shape the reverse pass:
+#
+#              1. Justification is decided by where a tool RESOLVES ON PATH, not
+#                 by scanning each output's bin/. An output the shell does not
+#                 need is never realised, so a scan would depend on which
+#                 directories exist on the machine running it. Every output is
+#                 still enumerated, because the resolved path must be
+#                 attributed to one of them, and binaries live in `bin`, `out`,
+#                 etc.
+#              2. `nix eval` caches flake evaluations, and a cached result can
+#                 describe a tree that has since changed. --no-eval-cache is
+#                 mandatory, not tidiness.
+#
+#              Real mode must be run INSIDE the devShell (run-all-checks always
+#              is). Fixture mode never asks Nix and needs no devShell.
+# @arg $1 dir optional fixture directory, which makes the script read
+#         `required-tools`, `packages.tsv`, `formatters.txt` and an optional
+#         `platform` from there instead of asking Nix and `uname`. It exists so
+#         the bats suite can drive both passes over a fabricated inventory in
+#         milliseconds; without it the only possible test would be "exits 0 on
+#         the real repo", which a script that always returned 0 would also
+#         pass. Only the inventory is fabricated -- both passes still resolve
+#         tools through PATH, so a fixture that puts its own bin directories on
+#         PATH exercises exactly the code the real run takes.
+#
+#         `platform` stands in for `uname -s`, defaulting to the real `uname -s`
+#         when it is absent. It is a fixture
+#         file rather than an environment variable on purpose: the `linux-only`
+#         annotation needs both a Linux and a non-Linux case, and routing the
+#         platform through the one mechanism the script already has for
+#         test-only inventories keeps that axis out of the real run entirely.
+#         The alternative -- skipping the Darwin case on a Linux runner -- would
+#         mean the branch is never executed by anything at all.
+# @stderr the usage line, one FAIL line (with indented hints) per failure, and
+#         one SKIP line per linux-only entry not checked off Linux; the ERR
+#         trap's `[<script>] ERROR: ...` report when a command fails instead
+# @exitcode 0 every declared tool resolves and every package is justified
+# @exitcode 1 the tools file is missing or unreadable, the list is empty, a
+#             declared tool is missing or carries an unknown annotation, the
+#             package inventory or formatter list is unreadable, the inventory
+#             is empty, or a package justifies nothing
+# @exitcode 2 more arguments were given than the script accepts
+# @exitcode * otherwise the failing git status, when no fixture directory is
+#             given and the repository root cannot be resolved
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+# Every positional below is optional, so a surplus argument is a typo -- a
+# misplaced flag, a stray path -- not input. Silently ignoring it would run the
+# check anyway and report success on something nobody asked for. Exit 2 rather
+# than 1: 1 is this script's verdict on what it inspected, and "you called it
+# wrong" must stay distinguishable from "what you pointed me at is wrong". The
+# ERR trap is dropped first only for symmetry with the verdict returns;
+# exit itself never fires it.
+if (($# > 1)); then
+  printf 'usage: %s [dir]\n' "${0##*/}" >&2
+  trap - ERR
+  exit 2
+fi
+
+readonly FIXTURE_DIR="${1:-}"
+
+# REPO_DIR is resolved only in real mode. Fixture mode must not need a git repo
+# at all: a bats test builds its fixture under a temp directory, and making the
+# fixture path depend on `git rev-parse` would couple it to the suite's working
+# directory.
+if [[ -n "${FIXTURE_DIR}" ]]; then
+  readonly TOOLS_FILE="${FIXTURE_DIR}/required-tools"
+else
+  REPO_DIR="$(git rev-parse --show-toplevel)"
+  readonly REPO_DIR
+  readonly TOOLS_FILE="${REPO_DIR}/.ci/required-tools"
+fi
+
+# Both expressions carry REPO_PLACEHOLDER rather than an interpolated path so
+# they can stay single-quoted: every `${...}` below is Nix syntax, and letting
+# bash near it would expand the lot. The substitution happens at the call site.
+# The reference is git+file://, never a bare path: Nix reads a bare absolute
+# path as path:, which copies the whole working tree into the store, ignored
+# and untracked files included, and aborts on a non-regular file such as a
+# daemon's Unix socket. Through git the check sees only tracked files (dirty
+# edits to them included), the same tree CI and `nix flake check` evaluate.
+#
+# shellcheck disable=SC2016 # every `${...}` below is Nix syntax, not a shell expansion
+readonly PACKAGES_EXPR='
+let
+  flake = builtins.getFlake "git+file://REPO_PLACEHOLDER";
+  system = builtins.currentSystem;
+  outputsOf = pkg: map (name: toString pkg.${name}) (pkg.outputs or [ "out" ]);
+  line = pkg: builtins.concatStringsSep "\t" ([ (pkg.pname or pkg.name) ] ++ outputsOf pkg);
+in
+builtins.concatStringsSep "\n" (map line flake.devShells.${system}.default.nativeBuildInputs)
+'
+
+# .treefmt.nix is read through flake.outPath, not as a bare path literal, so the
+# formatters and the packages come from ONE tree. Reading it directly off disk
+# would let the formatters and the packages disagree whenever the working tree
+# and the flake source differ.
+#
+# shellcheck disable=SC2016 # every `${...}` below is Nix syntax, not a shell expansion
+readonly FORMATTERS_EXPR='
+let
+  flake = builtins.getFlake "git+file://REPO_PLACEHOLDER";
+  system = builtins.currentSystem;
+  pkgs = flake.inputs.nixpkgs.legacyPackages.${system};
+  eval = flake.inputs.treefmt-nix.lib.evalModule pkgs (flake.outPath + "/.treefmt.nix");
+  formatters = eval.config.settings.formatter;
+in
+builtins.concatStringsSep "\n" (map (name: toString formatters.${name}.command) (builtins.attrNames formatters))
+'
+
+# @description Print every declared entry as `tool<TAB>annotation`, one per
+#              line, with an empty annotation for an unannotated entry.
+#              The file is data: blank lines and whole-line `#` comments are
+#              ignored and all whitespace is stripped, per line -- never over
+#              the whole stream, which would delete the newlines too and
+#              collapse the list into a single bogus entry.
+#
+#              Text after a `#` on a line that also names a tool is the
+#              ANNOTATION, not a comment, and it is handed on rather than
+#              discarded. A header promising "`#` comments ignored" would
+#              describe a parser that silently drops `linux-only` and quietly
+#              demands a Linux-only tool on macOS -- which is why .ci/required-tools' own
+#              header documents the annotation.
+# @noargs
+# @stdout tool<TAB>annotation per declared entry
+function declared_tools_annotated() {
+  local line name annotation
+  while IFS= read -r line; do
+    name="${line%%#*}"
+    name="${name//[[:space:]]/}"
+    if [[ -z "${name}" ]]; then
+      continue
+    fi
+    annotation=''
+    if [[ "${line}" == *'#'* ]]; then
+      annotation="${line#*#}"
+      annotation="${annotation//[[:space:]]/}"
+    fi
+    printf '%s\t%s\n' "${name}" "${annotation}"
+  done < "${TOOLS_FILE}"
+  return 0
+}
+
+# @description Print every tool declared in the tools file, one bare name per
+#              line, annotations dropped.
+#
+#              A separate function with a bare-names contract rather than
+#              folded into the annotated form: reverse_check consumes this and
+#              is entirely uninterested in annotations. Off Linux a linux-only
+#              tool is not in nativeBuildInputs at all, so there is no package
+#              to justify, and reverse_check's tool_paths loop already ignores a
+#              declared tool that does not resolve. Derived from the annotated form, not
+#              a second copy of the parser, so they cannot drift.
+# @noargs
+# @stdout one declared tool per line
+function declared_tools() {
+  local annotated entry
+  annotated="$(declared_tools_annotated)"
+  if [[ -z "${annotated}" ]]; then
+    return 0
+  fi
+  while IFS= read -r entry; do
+    printf '%s\n' "${entry%%$'\t'*}"
+  done <<< "${annotated}"
+  return 0
+}
+
+# @description Print the platform the forward pass should reason about, in
+#              `uname -s` terms (Linux, Darwin, ...).
+#
+#              Fixture mode may override it with a `platform` file, which is
+#              what lets tests/devshell-provides.bats drive BOTH sides of the
+#              `linux-only` branch on a single Linux runner. A test that
+#              skipped its Darwin case off Darwin would leave that branch
+#              executed by nothing anywhere.
+# @noargs
+# @stdout the platform name
+function host_platform() {
+  if [[ -n "${FIXTURE_DIR}" && -r "${FIXTURE_DIR}/platform" ]]; then
+    local platform
+    platform="$(< "${FIXTURE_DIR}/platform")"
+    printf '%s\n' "${platform//[[:space:]]/}"
+    return 0
+  fi
+  uname --kernel-name
+}
+
+# @description Print the devShell's packages, one per line, as the package name
+#              followed by every one of its output paths, tab-separated.
+# @noargs
+# @stdout name<TAB>outpath[<TAB>outpath...] per package
+function devshell_packages() {
+  if [[ -n "${FIXTURE_DIR}" ]]; then
+    cat "${FIXTURE_DIR}/packages.tsv"
+    return
+  fi
+  # No trailing `return 0` after this: it would swallow a failed `nix eval` and
+  # hand back an empty inventory, which the caller would then report as "the
+  # devShell declares no packages" -- a wrong verdict dressed up as a real one.
+  nix eval --raw --impure --no-eval-cache \
+    --expr "${PACKAGES_EXPR//REPO_PLACEHOLDER/${REPO_DIR}}"
+}
+
+# @description Print the absolute command path of every formatter .treefmt.nix
+#              enables, one per line.
+# @noargs
+# @stdout one formatter command path per line
+function formatter_commands() {
+  if [[ -n "${FIXTURE_DIR}" ]]; then
+    cat "${FIXTURE_DIR}/formatters.txt"
+    return
+  fi
+  nix eval --raw --impure --no-eval-cache \
+    --expr "${FORMATTERS_EXPR//REPO_PLACEHOLDER/${REPO_DIR}}"
+}
+
+# @description Assert every declared tool resolves on the live PATH.
+#
+#              Consumes the ANNOTATED entries so it can honour `linux-only`:
+#              off Linux such an entry is skipped, and the skip is PRINTED. A
+#              pass that quietly checked less than it claims to check is the
+#              exact failure this whole file is a defence against, so a Darwin
+#              run has to say which entries it let past.
+#
+#              An annotation the script does not recognise fails the entry
+#              outright instead of degrading to "no annotation". Degrading is
+#              the tempting behaviour and the wrong one: a typo'd
+#              `# linux_only` would then silently mean "required on every
+#              platform", the check would pass on Linux, and the macOS gate
+#              would break at some later, unrelated commit.
+# @arg $@ entries tool<TAB>annotation, one per declared entry
+# @stderr one FAIL line per entry that does not resolve, one FAIL line plus a
+#         hint per entry with an unrecognised annotation, and one SKIP line per
+#         entry the platform legitimately excuses
+# @exitcode 0 every entry resolves or was legitimately skipped
+# @exitcode 1 an entry does not resolve, or carries an unknown annotation
+function forward_check() {
+  local platform
+  platform="$(host_platform)"
+
+  local rc=0 entry tool annotation
+  for entry in "$@"; do
+    tool="${entry%%$'\t'*}"
+    annotation="${entry#*$'\t'}"
+    case "${annotation}" in
+      '') ;;
+      'linux-only')
+        if [[ "${platform}" != 'Linux' ]]; then
+          printf 'SKIP: %s is linux-only; not checked on %s\n' "${tool}" "${platform}" >&2
+          continue
+        fi
+        ;;
+      *)
+        printf 'FAIL: unrecognised annotation on declared tool %s: %s\n' \
+          "${tool}" "${annotation}" >&2
+        printf '      The only annotation this lint understands is linux-only.\n' >&2
+        printf '      A plain note belongs on its own line above the tool.\n' >&2
+        rc=1
+        continue
+        ;;
+    esac
+    if ! command -v "${tool}" > /dev/null 2>&1; then
+      printf 'FAIL: declared tool not provided by the devShell: %s\n' "${tool}" >&2
+      rc=1
+    fi
+  done
+  return "${rc}"
+}
+
+# @description Assert every devShell package is justified -- it ships a declared
+#              tool, or it backs a formatter .treefmt.nix enables.
+# @arg $@ tools the declared tools
+# @stderr one FAIL line plus a hint per unjustified package, or one FAIL line
+#         for a failed read of the package inventory or the formatter list, or
+#         for an empty inventory
+# @exitcode 0 every package is justified
+# @exitcode 1 at least one package justifies nothing, the inventory is empty, or
+#             the package inventory or the formatter list could not be read
+function reverse_check() {
+  local -ra tools=("$@")
+  # Both statuses are tested explicitly rather than left to errexit. main calls
+  # this function as `reverse_check ... || rc=1`, and that trailing `||` turns
+  # errexit off for the function's entire dynamic extent. So a failed
+  # `nix eval` here does NOT abort: without these guards it would fall through
+  # as an empty inventory and be reported as "the devShell declares no
+  # packages", which is a wrong verdict wearing the costume of a real one.
+  # `mapfile < <(...)` has the same hazard for a different reason -- a process
+  # substitution's status is invisible to mapfile -- which is why the reads
+  # below go through command substitution.
+  local packages_raw formatters_raw
+  if ! packages_raw="$(devshell_packages)"; then
+    printf 'FAIL: could not read the devShell package inventory\n' >&2
+    return 1
+  fi
+  if ! formatters_raw="$(formatter_commands)"; then
+    printf 'FAIL: could not read the treefmt formatter list\n' >&2
+    return 1
+  fi
+
+  # packages rows are `name<TAB>outpath[<TAB>outpath...]`; formatters rows are
+  # one command path each.
+  local -a packages=() formatters=()
+  if [[ -n "${packages_raw}" ]]; then
+    mapfile -t packages <<< "${packages_raw}"
+  fi
+  if [[ -n "${formatters_raw}" ]]; then
+    mapfile -t formatters <<< "${formatters_raw}"
+  fi
+
+  if ((${#packages[@]} == 0)); then
+    printf 'FAIL: the devShell declares no packages\n' >&2
+    return 1
+  fi
+
+  # Where each declared tool ACTUALLY resolves on the devShell's PATH. This is
+  # the whole basis of rule 1, and it is deliberately not a scan of every
+  # output's bin/: an output that the shell does not need is never realised, so
+  # scanning it asks the filesystem about a directory that may not exist on the
+  # machine running the lint. Resolving through PATH only ever names paths that
+  # exist, and says the thing the lint actually means: this package puts a tool
+  # we use into the shell.
+  local -a tool_paths=()
+  local resolved tool
+  for tool in "${tools[@]}"; do
+    resolved="$(command -v "${tool}" 2> /dev/null || true)" # command -v exits 1 off PATH; empty is the not-found signal
+    if [[ -n "${resolved}" ]]; then
+      tool_paths+=("${resolved}")
+    fi
+  done
+
+  local rc=0 entry name output formatter tool_path justified
+  local -a outputs=()
+  for entry in "${packages[@]}"; do
+    name="${entry%%$'\t'*}"
+    IFS=$'\t' read -r -a outputs <<< "${entry#*$'\t'}"
+    justified=''
+
+    # Every output, because a package's binaries may live in any of them: jq
+    # and ShellCheck both ship theirs in `bin`, nix ships its own in `out`.
+    # (That sentence must not open with the word shellcheck -- a comment
+    # starting with it is parsed as a shellcheck directive, SC1072/SC1073.)
+    for output in "${outputs[@]}"; do
+      for tool_path in "${tool_paths[@]}"; do
+        if [[ "${tool_path}" == "${output}/"* ]]; then
+          justified='tool'
+          break 2
+        fi
+      done
+    done
+
+    if [[ -z "${justified}" ]]; then
+      for formatter in "${formatters[@]}"; do
+        for output in "${outputs[@]}"; do
+          if [[ "${formatter}" == "${output}/"* ]]; then
+            justified='formatter'
+            break 2
+          fi
+        done
+      done
+    fi
+
+    if [[ -z "${justified}" ]]; then
+      printf 'FAIL: devShell package justifies nothing: %s\n' "${name}" >&2
+      printf '      Declare one of its binaries in %s, enable it in\n' "${TOOLS_FILE}" >&2
+      printf '      .treefmt.nix, or drop it from the devShell.\n' >&2
+      rc=1
+    fi
+  done
+  return "${rc}"
+}
+
+function main() {
+  if [[ ! -r "${TOOLS_FILE}" ]]; then
+    printf 'FAIL: %s is missing or unreadable\n' "${TOOLS_FILE}" >&2
+    # A gate reporting its own verdict is not a crash: drop the ERR trap so the
+    # diagnostics above are the last thing the reader sees.
+    trap - ERR
+    return 1
+  fi
+
+  # The same list in an annotated and a bare view, deliberately. forward_check
+  # needs the annotations to honour `linux-only`; reverse_check takes bare names.
+  # tools rows are bare names; annotated rows are `tool<TAB>annotation`
+  # (annotation may be empty).
+  local -a tools=() annotated=()
+  mapfile -t tools < <(declared_tools)
+  mapfile -t annotated < <(declared_tools_annotated)
+
+  local rc=0
+  if ((${#tools[@]} == 0)); then
+    printf 'FAIL: no tools declared in %s\n' "${TOOLS_FILE}" >&2
+    # With the list empty the forward pass would check nothing and pass, and the
+    # reverse pass would report every package no formatter backs as unjustified.
+    # Stop here so the real cause is the only output.
+    # A gate reporting its own verdict is not a crash: drop the ERR trap so the
+    # diagnostics above are the last thing the reader sees.
+    trap - ERR
+    return 1
+  fi
+
+  forward_check "${annotated[@]}" || rc=1
+  reverse_check "${tools[@]}" || rc=1
+
+  # A gate reporting its own verdict is not a crash: drop the ERR trap so the
+  # diagnostics above are the last thing the reader sees.
+  trap - ERR
+  return "${rc}"
+}
+
+main "$@"

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+
+# @description Run the BATS suite under tests/, or the .bats files the arguments
+#              name. Snapshots repo state (HEAD, config, index) before and after
+#              and dies loudly if the suite mutated the real repo, even when
+#              every file passed -- a test that escapes its fixture and runs git
+#              against the real checkout is a real risk, and a green run hides it.
+#
+#              Plain `bats`, one process over every file: no pool, no slicing.
+#              Naming no argument runs every tests/*.bats and adds
+#              `--print-output-on-failure`.
+# @arg $@ files optional .bats files to run; any other argument is passed to
+#         bats as given
+# @stderr a `[<script>] <message>` banner or `FATAL` line, bats' own output
+#         when a test fails; the ERR trap's `[<script>] ERROR: ...` report when
+#         a command fails instead
+# @exitcode 0 all tests passed and the repo was left untouched
+# @exitcode 1 bats missing, the suite mutated the repo, or the host bash is
+#             older than 4.4
+# @exitcode * otherwise the failing git status when the repository root cannot
+#             be resolved, or the status bats exited with
+
+set -Eeuo pipefail
+# `inherit_errexit` is a bash 4.4 builtin option: on stock macOS bash 3.2, and
+# on 4.2 or 4.3, the shell aborts with `shopt: inherit_errexit: invalid shell
+# option name`, which tells a coworker running ./run-tests nothing about what to
+# install. Check first, and say what to do. Must stay ABOVE the `shopt` line it
+# is protecting.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  printf '%s: bash 4.4+ required to run the suite (found %s.%s). On macOS: brew install bash.\n' \
+    "${0##*/}" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" >&2
+  exit 1
+fi
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+readonly REPO_DIR
+
+# @description Print one fatal diagnostic to stderr and exit 1.
+# @arg $1 message the diagnostic text
+# @stderr the `[<script>] FATAL: <message>` line
+# @exitcode 1 always
+function die() {
+  printf '[%s] FATAL: %s\n' "${0##*/}" "$1" >&2
+  exit 1
+}
+
+# @description Print one line per watched repo artifact: HEAD sha, config hash,
+#              index hash. Used before and after the suite to detect fixture
+#              escapes onto the real repo.
+# @noargs
+# @stdout one KEY=value line per watched artifact
+function repo_state() {
+  local head_ref config_hash index_hash config_path index_path
+  head_ref="$(git -C "${REPO_DIR}" rev-parse --quiet --verify HEAD || printf 'NO-HEAD')"
+  config_path="$(git -C "${REPO_DIR}" rev-parse --path-format=absolute --git-path 'config')"
+  index_path="$(git -C "${REPO_DIR}" rev-parse --path-format=absolute --git-path 'index')"
+  config_hash="$([[ -f "${config_path}" ]] && git hash-object "${config_path}" || printf 'ABSENT')"
+  index_hash="$([[ -f "${index_path}" ]] && git hash-object "${index_path}" || printf 'ABSENT')"
+  printf 'HEAD=%s\nconfig=%s\nindex=%s\n' "${head_ref}" "${config_hash}" "${index_hash}"
+}
+
+function main() {
+  # Unset BASH_ENV so bats' per-test subshells do not re-source the user's
+  # interactive ~/.bashrc. That re-source fires for every test subshell, making
+  # the suite dramatically slower and clobbering exported vars in child shells.
+  unset BASH_ENV
+
+  if ! command -v bats > /dev/null 2>&1; then
+    die "bats not found on PATH — run './.ci/in-devshell ./run-tests' or 'just test'"
+  fi
+
+  if (($# == 0)); then
+    set -- '--print-output-on-failure' "${REPO_DIR}"/tests/*.bats
+  fi
+
+  local before after status=0
+  before="$(repo_state)"
+  # Status captured through `||`, not left to errexit: a failing suite must
+  # still reach the mutation check below, which is the more important verdict.
+  bats "$@" || status="$?"
+  after="$(repo_state)"
+
+  if [[ "${before}" != "${after}" ]]; then
+    die "test suite mutated the real repo — before: [${before//$'\n'/ }] after: [${after//$'\n'/ }]"
+  fi
+  # A gate reporting its own verdict is not a crash: drop the ERR trap so the
+  # bats output above is the last thing the reader sees.
+  trap - ERR
+  return "${status}"
+}
+
+main "$@"

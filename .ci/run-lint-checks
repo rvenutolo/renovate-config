@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+
+# @description Run the config/markup lint suite: shellcheck and shfmt over
+#              every tracked shell script, plus just --fmt, statix, deadnix,
+#              actionlint, zizmor, yamllint, renovate-config-validator,
+#              markdownlint, typos and editorconfig-checker. Aggregates exit
+#              codes rather than failing fast, so one run surfaces every
+#              failing category.
+# @noargs
+# @stderr a `[<script>] <message>` banner before each step, the reason for each
+#         empty file list or missing input, and a closing line on a non-zero
+#         verdict; the ERR trap's `[<script>] ERROR: ...` report when a command
+#         fails instead
+# @exitcode 0 every linter passed
+# @exitcode 1 at least one linter failed, a file list came up empty, or the
+#             workflow directory or a listed Renovate config is missing
+# @exitcode * otherwise the failing git status, when the repository root cannot
+#             be resolved
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+readonly REPO_DIR
+
+# The Renovate configs the validator step checks, relative to the repo root:
+# the shared preset itself and this repo's own consumer config.
+#
+# .github/renovate.json5 extends this repo's own preset through `local>`. The
+# validator checks only the file's shape and never resolves `extends`, so the
+# gate stays hermetic with that line in place: the validator accepts even a
+# `local>` reference to a repository that does not exist, and makes no network
+# call for it. No skip option is needed.
+readonly RENOVATE_CONFIGS=(
+  'default.json'
+  '.github/renovate.json5'
+)
+
+# @description Log a step banner to stderr.
+# @arg $1 message the text to log
+# @stderr the `[<script>] <message>` line
+function log() {
+  local -r message="$1"
+  printf '[%s] %s\n' "${0##*/}" "${message}" >&2
+}
+
+# @description Collect tracked shell scripts: *.sh, *.bash and *.bats, plus
+#              any other file, outside a skip list of non-shell extensions,
+#              whose first line is exactly `#!/usr/bin/env bash`.
+#              `git ls-files` rather than a tree walk so untracked scratch files
+#              are never linted.
+#
+#              *.bats is bash too, and no linter reaches it unless this list
+#              names it. Once named, shellcheck needs no help with it: a bats
+#              file carries no shebang, and shellcheck falls back to bash for
+#              a shebang-less file, so neither `--shell=bash` nor a per-file
+#              `# shellcheck shell=bash` directive is required. shfmt does need
+#              help -- the bats dialect reaches it from .editorconfig, see the
+#              comment on that file's `[*.bats]` section.
+#
+#              The catch-all arm matches the canonical shebang as an EXACT
+#              string, and what makes that safe is a separate gate, not this
+#              function: .ci/check-shell-shebangs fails loudly on a tracked
+#              file whose shebang names bash in any other spelling, and forces
+#              a non-bash interpreter to be declared by name. Without it, a
+#              script written `#!/bin/bash` is dropped from both shellcheck and
+#              shfmt with no diagnostic at all, and the empty-scan guard in
+#              `main` below does not catch it -- that fires only when the list
+#              is entirely empty, never when it is one file short.
+#              Loosening the match here instead would be the wrong shape: this
+#              function's whole contract is one path per line, it runs inside a
+#              process substitution feeding `mapfile`, and a non-zero return
+#              from it reaches nobody.
+# @noargs
+# @stdout one path per line
+function shell_files() {
+  local file first_line
+  while IFS= read -r file; do
+    case "${file}" in
+      *.sh | *.bash | *.bats) printf '%s\n' "${file}" ;;
+      *.md | *.json | *.yml | *.yaml | *.toml | *.nix | *.lock) ;;
+      *)
+        if [[ -f "${file}" ]] && IFS= read -r first_line < "${file}" \
+          && [[ "${first_line}" == '#!/usr/bin/env bash' ]]; then
+          printf '%s\n' "${file}"
+        fi
+        ;;
+    esac
+  done < <(git -C "${REPO_DIR}" ls-files)
+}
+
+function main() {
+  local rc=0
+  local -a files=()
+  mapfile -t files < <(shell_files)
+
+  log 'running shellcheck'
+  if ((${#files[@]} > 0)); then
+    # LC_ALL is scoped to shellcheck on purpose. The hermetic devShell sets no
+    # locale, and shellcheck (Haskell) then encodes its output as ASCII: it
+    # dies with "commitBuffer: invalid argument" when a finding lands on a line
+    # containing a non-ASCII character such as an em dash, and the diagnostic
+    # is cut off mid-sentence.
+    LC_ALL=C.UTF-8 shellcheck "${files[@]}" || rc=1
+  else
+    log 'no shell files found — this is a failure, not a clean pass'
+    rc=1
+  fi
+
+  log 'running shfmt (verify only)'
+  if ((${#files[@]} > 0)); then
+    shfmt --list --diff "${files[@]}" || rc=1
+  fi
+
+  log 'running just --fmt (verify only)'
+  # --unstable is mandatory: `--fmt` is still an unstable subcommand and just
+  # refuses to run it without the flag. Drop it when just stabilises --fmt.
+  # --check makes it verify-only, matching every other step in this gate.
+  just --fmt --check --unstable --justfile "${REPO_DIR}/.justfile" || rc=1
+
+  log 'running statix and deadnix'
+  # Tracked files only, and an explicit list rather than `statix check .`:
+  # a bare directory target walks .direnv/, which holds every flake input's
+  # source tree, so the gate would lint nixpkgs itself and fail on its
+  # fixtures. Same reason markdownlint and typos take explicit lists below.
+  #
+  # statix takes a single TARGET, not a file list, so it needs the loop.
+  # deadnix accepts them all at once.
+  local -a nix_files=()
+  mapfile -t nix_files < <(git -C "${REPO_DIR}" ls-files '*.nix')
+  if ((${#nix_files[@]} > 0)); then
+    local nix_file
+    for nix_file in "${nix_files[@]}"; do
+      statix check "${REPO_DIR}/${nix_file}" || rc=1
+    done
+    deadnix --fail "${nix_files[@]}" || rc=1
+  else
+    log 'no nix files found - this is a failure, not a clean pass'
+    rc=1
+  fi
+
+  log 'running actionlint'
+  # A missing workflows directory is a failure, not a skip: the repo's CI is
+  # defined there, and a gate that finds nothing to read has looked at nothing.
+  if [[ -d "${REPO_DIR}/.github/workflows" ]]; then
+    actionlint || rc=1
+    # examples/ holds caller workflows shipped to consumers; actionlint only
+    # discovers .github/workflows on its own, so name them explicitly.
+    if [[ -d "${REPO_DIR}/examples" ]]; then
+      actionlint "${REPO_DIR}"/examples/*.yml || rc=1
+    fi
+  else
+    log 'no .github/workflows directory found - this is a failure, not a clean pass'
+    rc=1
+  fi
+
+  log 'running zizmor'
+  # zizmor is to the workflows what shellcheck is to the scripts. actionlint,
+  # the step above, reads a workflow as YAML and as bash and asks whether it is
+  # VALID; zizmor asks whether it is SAFE -- template injection into a `run:`
+  # block, over-broad `permissions:`, credentials left persisted in
+  # .git/config, environment-file writes a later step will trust. Neither tool
+  # reports what the other does.
+  #
+  # --no-online-audits so the hermetic gate needs no network. The online audits
+  # add only "is this `uses:` ref a tag or an immutable commit" checks, and
+  # .ci/check-uses-sha-pinned already answers that offline, from the tree.
+  #
+  # --persona=pedantic, probed rather than assumed: against this tree it reports
+  # exactly what the default persona does, so it costs nothing and catches the
+  # next pedantic-only finding for free. `auditor` is deliberately NOT used --
+  # its extra findings here (`misfeature`, `secrets-outside-env`) would each
+  # need a suppression to say nothing useful.
+  #
+  # Every finding this tree suppresses is suppressed INLINE, next to the code,
+  # never in a config file: a suppression a reader cannot see from the line it
+  # excuses is a suppression nobody re-examines. Each suppression carries its
+  # reason in the surrounding YAML comment, and sits on the KEY it excuses --
+  # the `run:` or the `uses:` -- and not on a line inside the block it
+  # describes: zizmor reads YAML comments, and a `#` inside a block scalar is
+  # shell source it never sees.
+  #
+  # .github/ and not `.` : zizmor's own discovery walks for workflows, and a
+  # bare `.` would descend into the author's untracked docs/superpowers/ tree
+  # for the same reason markdownlint and typos take explicit lists below.
+  if [[ -d "${REPO_DIR}/.github" ]]; then
+    zizmor --no-online-audits --persona=pedantic "${REPO_DIR}/.github/" || rc=1
+    # examples/ holds caller workflows shipped to consumers, which zizmor must
+    # audit too.
+    if [[ -d "${REPO_DIR}/examples" ]]; then
+      zizmor --no-online-audits --persona=pedantic "${REPO_DIR}/examples/" || rc=1
+    fi
+  else
+    log 'no .github directory found - this is a failure, not a clean pass'
+    rc=1
+  fi
+
+  log 'running yamllint'
+  yamllint --strict '.' || rc=1
+
+  log 'running renovate-config-validator'
+  # --no-global is required, not cosmetic: a config named on the command line is
+  # validated against the GLOBAL self-hosted schema by default, and these are
+  # repo configs. --strict turns the validator's warnings (a deprecated or
+  # migrated option) into failures, so a preset that only works through
+  # Renovate's silent migration cannot pass. Explicit paths rather than bare
+  # auto-discovery because the bare form resolves the default filenames relative
+  # to the CURRENT directory and, finding none, exits 0 with only a warning --
+  # a gate that passes by looking at nothing. Without any of this a malformed
+  # config is not a CI failure: Renovate just stops opening dependency PRs.
+  # A missing config is a failure, not a skip: a gate that finds nothing to read
+  # has looked at nothing.
+  local renovate_config
+  for renovate_config in "${RENOVATE_CONFIGS[@]}"; do
+    if [[ -f "${REPO_DIR}/${renovate_config}" ]]; then
+      renovate-config-validator --no-global --strict "${REPO_DIR}/${renovate_config}" || rc=1
+    else
+      log "no ${renovate_config} found - this is a failure, not a clean pass"
+      rc=1
+    fi
+  done
+
+  log 'running markdownlint'
+  # Tracked files only. markdownlint does not honour gitignore, so a glob would
+  # lint the untracked docs/superpowers/ tree and redden every local gate.
+  local -a md_files=()
+  mapfile -t md_files < <(git -C "${REPO_DIR}" ls-files '*.md')
+  if ((${#md_files[@]} > 0)); then
+    markdownlint-cli2 "${md_files[@]}" || rc=1
+  else
+    log 'no markdown files found - this is a failure, not a clean pass'
+    rc=1
+  fi
+
+  log 'running typos'
+  # Explicit file list, not a bare `typos`. Bare `typos` walks the tree and
+  # SKIPS HIDDEN PATHS, so it silently leaves out .ci/, .github/,
+  # .githooks/ and reports a clean pass regardless.
+  # `--hidden` is the wrong fix -- it also picks up UNTRACKED hidden paths.
+  #
+  # `git grep -I --files-with-matches ''` is every tracked file git considers
+  # text: it matches every line, so it names every file, and -I drops the
+  # binaries, which typos would otherwise read as prose.
+  local -a typo_files=()
+  mapfile -t typo_files < <(git -C "${REPO_DIR}" grep -I --files-with-matches '')
+  if ((${#typo_files[@]} > 0)); then
+    typos "${typo_files[@]}" || rc=1
+  else
+    log 'no text files found for typos - this is a failure, not a clean pass'
+    rc=1
+  fi
+
+  log 'running editorconfig-checker'
+  editorconfig-checker || rc=1
+
+  if ((rc != 0)); then
+    log 'one or more linters failed'
+  fi
+  # A gate reporting its own verdict is not a crash: drop the ERR trap so the
+  # diagnostics above are the last thing the reader sees.
+  trap - ERR
+  return "${rc}"
+}
+
+main "$@"

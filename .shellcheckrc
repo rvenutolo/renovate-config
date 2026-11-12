@@ -1,0 +1,7 @@
+# Optional checks, each matching a bash style rule this repo holds its scripts
+# to. require-variable-braces asks for ${var} and leaves the single-character
+# specials and the positionals ($?, $#, $1) alone. require-double-brackets asks
+# for [[ ]] over [ ]. deprecate-which asks for `command -v` over `which`.
+enable=require-variable-braces
+enable=require-double-brackets
+enable=deprecate-which

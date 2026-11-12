@@ -1,0 +1,75 @@
+# Tools the repo's own tooling shells out to. The comment above each entry
+# names what uses it; the closing block holds the baseline userland. This file
+# is data: one tool per line, blank lines and whole-line `#` comments ignored,
+# no shebang and no executable bit.
+#
+# A `#` comment on the SAME line as a tool is NOT a free-form note -- it is an
+# annotation the lint reads and validates. Exactly one annotation exists:
+#
+#   sometool  # linux-only
+#
+# `linux-only` means the devShell carries the tool on Linux and deliberately
+# does not carry it elsewhere, so the forward pass skips the entry (loudly, with
+# a SKIP: line) when it is not running on Linux. Anything else after the `#` on
+# a tool's line is a hard failure, not a comment: a typo'd `# linux_only` that
+# quietly reverted to "required on every platform" is exactly the drift this
+# file exists to catch. Put a justifying note on its own line ABOVE the tool,
+# the way every entry below already does.
+#
+# .ci/check-devshell-provides reads this file in both directions:
+# - forward: every entry here must resolve on PATH inside the devShell;
+# - reverse: every devShell package must be where one of these binaries actually
+#   RESOLVES on PATH, OR back a formatter .treefmt.nix enables. Resolution, not
+#   mere presence: a package shipping a binary that another package shadows is
+#   contributing nothing to the shell, and the lint says so.
+#
+# The formatter escape is why prettier, yamlfmt, nixfmt and taplo are absent:
+# treefmt runs them from the Nix store, never through PATH, and the lint derives
+# their exemption from .treefmt.nix rather than from a list kept here.
+
+# invoked by .ci/run-lint-checks
+actionlint
+# run-tests invokes bats from PATH; the devShell provides it
+bats
+# invoked by .githooks/commit-msg
+commitlint
+# invoked by .ci/run-lint-checks
+editorconfig-checker
+# invoked by .ci/run-lint-checks
+deadnix
+# invoked by .ci/run-lint-checks
+statix
+# every repo-tooling script derives the repo root via `git rev-parse`
+git
+# JSON inspection in the repo's scripts and tests
+jq
+# the task runner the .justfile documents; .ci/run-lint-checks verifies its
+# formatting with `just --fmt`
+just
+# invoked by .ci/run-lint-checks
+markdownlint-cli2
+# the gates' own nix; flake.nix pins it as nix.out so this resolves to the
+# locked version rather than to whatever nix the host happens to ship
+nix
+# invoked by .ci/run-lint-checks; the binary name, not its `renovate` package
+renovate-config-validator
+# the lint gate for the repo's shell scripts
+shellcheck
+# the format gate; treefmt drives it and .ci/run-lint-checks verifies the
+# extensionless scripts with it
+shfmt
+# invoked by .ci/run-lint-checks
+typos
+# invoked by .ci/run-lint-checks
+yamllint
+# invoked by .ci/run-lint-checks; the workflow security audit next to actionlint
+zizmor
+
+# The baseline userland the gates shell out to. stdenv puts these on PATH
+# anyway, at byte-identical store paths, so naming them buys no new binary --
+# it converts an inherited nixpkgs internal (stdenv.initialPath, which no gate
+# asserts and a flake.lock bump could change) into a declared dependency, and
+# it is what justifies coreutils, findutils and gnugrep to the reverse pass.
+grep
+find
+mkdir

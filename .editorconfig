@@ -1,0 +1,54 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{sh,bash}]
+shell_variant = bash
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+
+# `.bats` is its own shfmt dialect, and the split is load-bearing rather than
+# tidiness: under `shell_variant = bash` shfmt cannot PARSE a bats file at all --
+# every one dies with ``tests/x.bats:NN:1: `}` can only be used to close a
+# block`` on the first `@test "..." { ... }`. The dialect has to reach shfmt
+# from here and not from an `-ln bats` flag on the command line, because shfmt
+# reads .editorconfig only when it is given NO parser or printer flag: the flag
+# would buy the dialect and silently discard the style keys below,
+# reindenting every bats file to tabs.
+[*.bats]
+shell_variant = bats
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+
+# The repo's extensionless bash scripts. shfmt resolves its style per path, so
+# without these sections it falls back to its own defaults for anything the
+# sections above do not match and rejects the formatting the rest of the repo
+# is written in.
+[{run-all-checks,run-tests}]
+shell_variant = bash
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+
+[.ci/**]
+shell_variant = bash
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+
+[.githooks/**]
+shell_variant = bash
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+
+[*.md]
+trim_trailing_whitespace = false
