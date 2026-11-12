@@ -49,9 +49,11 @@
     ];
   };
 
-  # CHANGELOG.md is written by release-please in its own format on every
-  # release PR; reformatting it would fail the formatting check on each one.
+  # CHANGELOG.md and .release-please-manifest.json are written by
+  # release-please in its own format on every release PR; reformatting them
+  # would fail the formatting check on each one.
   settings.global.excludes = [
+    ".release-please-manifest.json"
     "CHANGELOG.md"
     "flake.lock"
     "LICENSE"

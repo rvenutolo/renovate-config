@@ -61,6 +61,29 @@ function yaml_assert() {
   jq --exit-status '.packages["."]["release-as"] == "1.0.0"' "${CONFIG}" > /dev/null
 }
 
-@test "release-please manifest: starts empty" {
-  jq --exit-status '. == {}' "${MANIFEST}" > /dev/null
+# @description Assert a release-please manifest maps only the root package,
+#              if anything, to a semver version.
+# @arg $1 string path to the manifest
+function manifest_shape_ok() {
+  jq --exit-status 'type == "object"
+    and (keys - ["."] | length == 0)
+    and ([.[]] | all(type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))' "$1" > /dev/null
+}
+
+@test "release-please manifest: maps only the root package to a semver version" {
+  # release-please rewrites this file on every release, so the test pins its
+  # shape, not a value: empty before the first release, then the root
+  # package's current version.
+  manifest_shape_ok "${MANIFEST}"
+}
+
+@test "release-please manifest: the shape check accepts a released version" {
+  printf '{".":"1.0.0"}\n' > "${BATS_TEST_TMPDIR}/manifest.json"
+  manifest_shape_ok "${BATS_TEST_TMPDIR}/manifest.json"
+}
+
+@test "release-please manifest: the shape check rejects a non-root package" {
+  printf '{"pkg":"1.0.0"}\n' > "${BATS_TEST_TMPDIR}/manifest.json"
+  run manifest_shape_ok "${BATS_TEST_TMPDIR}/manifest.json"
+  assert_failure
 }
