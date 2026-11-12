@@ -51,6 +51,8 @@ jobs:
     concurrency:
       group: renovate-failure-issue-${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}
       cancel-in-progress: false
+    # The pinned path, SHA and tag comment run past common line limits.
+    # yamllint disable-line rule:line-length
     uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
     with:
       mode: open
@@ -67,6 +69,8 @@ jobs:
     permissions:
       issues: write  # record the outcome in the failure issue and close it
       pull-requests: read  # read the closed PR's details
+    # The pinned path, SHA and tag comment run past common line limits.
+    # yamllint disable-line rule:line-length
     uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
     with:
       mode: close
