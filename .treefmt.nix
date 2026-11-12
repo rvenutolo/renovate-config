@@ -49,7 +49,10 @@
     ];
   };
 
+  # CHANGELOG.md is written by release-please in its own format on every
+  # release PR; reformatting it would fail the formatting check on each one.
   settings.global.excludes = [
+    "CHANGELOG.md"
     "flake.lock"
     "LICENSE"
   ];

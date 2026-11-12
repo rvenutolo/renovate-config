@@ -235,8 +235,11 @@ function main() {
   log 'running markdownlint'
   # Tracked files only. markdownlint does not honour gitignore, so a glob would
   # lint the untracked docs/superpowers/ tree and redden every local gate.
+  # CHANGELOG.md is left out: release-please writes it in its own format on
+  # every release PR, and linting it would redden each one with nothing a
+  # human can fix.
   local -a md_files=()
-  mapfile -t md_files < <(git -C "${REPO_DIR}" ls-files '*.md')
+  mapfile -t md_files < <(git -C "${REPO_DIR}" ls-files '*.md' ':!:CHANGELOG.md')
   if ((${#md_files[@]} > 0)); then
     markdownlint-cli2 "${md_files[@]}" || rc=1
   else
