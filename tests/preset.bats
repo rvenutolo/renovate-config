@@ -89,6 +89,11 @@ function preset_assert() {
   preset_assert 'any(.packageRules[]; .matchPackageNames == ["*"] and .minimumReleaseAge == "7 days")'
 }
 
+@test "preset: 7-day rule does not hold updates that have no release timestamp" {
+  preset_assert '[.packageRules[] | select(.matchPackageNames == ["*"] and .minimumReleaseAge == "7 days")]
+    | length == 1 and .[0].minimumReleaseAgeBehaviour == "timestamp-optional"'
+}
+
 @test "preset: release-age carve-outs follow the 7-day rule" {
   preset_assert '
     (.packageRules | map(.matchPackageNames == ["*"] and .minimumReleaseAge == "7 days") | index(true)) as $age
@@ -96,12 +101,7 @@ function preset_assert() {
         ((.matchUpdateTypes // []) as $t
           | (["lockFileMaintenance","pin","replacement","bump","rollback","lockfileUpdate"] | all(. as $x | $t | index($x) != null))
           and has("minimumReleaseAge") and .minimumReleaseAge == null)) | index(true)) as $none
-    | (.packageRules | map(
-        ((.matchUpdateTypes // []) as $t
-          | (["digest","pinDigest"] | all(. as $x | $t | index($x) != null))
-          and .minimumReleaseAgeBehaviour == "timestamp-optional")) | index(true)) as $optional
-    | $age != null and $none != null and $optional != null
-    and $none > $age and $optional > $age'
+    | $age != null and $none != null and $none > $age'
 }
 
 @test "preset: own releases exempt from release age, after the 7-day rule" {

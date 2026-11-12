@@ -15,7 +15,7 @@
     "labels dependencies: Renovate PRs carry the dependencies label.",
     "nix enabled: flake.lock inputs are updated.",
     "vulnerabilityAlerts: security fixes go out right away, each in its own PR, ignoring the weekly schedule, grouping and release age, and automerge like everything else. schedule [], minimumReleaseAge null and groupName null are the defaults, written out. It relies on Dependabot alerts being enabled for the repo.",
-    "packageRules, in order: the non-major batch, the 7-day release age, the release-age carve-outs, and the exemption for this preset's own releases. Order matters because a later rule wins. Consumers override with a later packageRules entry, not a top-level key."
+    "packageRules, in order: the non-major batch, the 7-day release age (which does not hold updates that have no release timestamp), the release-age carve-outs, and the exemption for this preset's own releases. Order matters because a later rule wins. Consumers override with a later packageRules entry, not a top-level key."
   ],
   "extends": ["config:best-practices"],
   "timezone": "America/New_York",
@@ -70,9 +70,13 @@
       "groupSlug": "all-non-major"
     },
     {
-      "description": "Wait 7 days after release before proposing an update. Set in a packageRules entry, not top-level, because config:best-practices includes a packageRules entry (security:minimumReleaseAgeNpm, npm, 3 days) that would beat a top-level value.",
+      "description": [
+        "Wait 7 days after release before proposing an update. Set in a packageRules entry, not top-level, because config:best-practices includes a packageRules entry (security:minimumReleaseAgeNpm, npm, 3 days) that would beat a top-level value.",
+        "minimumReleaseAgeBehaviour timestamp-optional: an update whose source publishes no release timestamp, such as many digests, is proposed without waiting. Under the default timestamp-required it would be held indefinitely. Updates with a timestamp still wait 7 days."
+      ],
       "matchPackageNames": ["*"],
-      "minimumReleaseAge": "7 days"
+      "minimumReleaseAge": "7 days",
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
     },
     {
       "description": "No release age for update types where it makes no sense, copied from Renovate's own carve-outs. Lock-file maintenance never matches the * rule, but the carve-out stops a later rule keyed on update types from catching it.",
@@ -85,11 +89,6 @@
         "lockfileUpdate"
       ],
       "minimumReleaseAge": null
-    },
-    {
-      "description": "Digests often have no release timestamp. Under the default timestamp-required they would be held indefinitely, so a missing timestamp is allowed.",
-      "matchUpdateTypes": ["digest", "pinDigest"],
-      "minimumReleaseAgeBehaviour": "timestamp-optional"
     },
     {
       "description": "This preset's own releases skip the release age, so a release reaches consumers in the next window. Must come after the 7-day rule. Renovate names this repo rvenutolo/renovate-config both for github> preset references and for uses: reusable-workflow references.",

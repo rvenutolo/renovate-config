@@ -33,10 +33,11 @@ pinned to a release tag.
 - **Security fixes** ignore the schedule, the batch and the release age: each
   gets its own PR right away and automerges. They rely on Dependabot alerts
   being enabled for the repo.
-- **Release age.** A release must be 7 days old before it is proposed. Some
-  updates are exempt: lock-file maintenance, pins, replacements, bumps,
-  rollbacks and lock-file updates have no release to wait for; digests are
-  allowed to have no release timestamp; and this preset's own releases
+- **Release age.** A release must be 7 days old before it is proposed. An
+  update whose source publishes no release timestamp, as is common for
+  digests, is not held: it is proposed without waiting. Some updates are
+  exempt: lock-file maintenance, pins, replacements, bumps, rollbacks and
+  lock-file updates have no release to wait for; and this preset's own releases
   (`rvenutolo/renovate-config`) skip the wait so they reach consumers in the
   next window.
 - **Dependency Dashboard** stays on as the overview of pending and held updates.
