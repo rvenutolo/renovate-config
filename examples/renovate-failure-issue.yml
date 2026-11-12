@@ -24,7 +24,9 @@ on:
 permissions: {}
 concurrency:
   # One run per Renovate branch at a time, so parallel runs cannot file duplicate
-  # issues. Never cancelled: a cancelled close would leave its issue open.
+  # issues. cancel-in-progress: false keeps a newer event from killing a running
+  # job midway; a pending run can still be replaced by a newer one, which is why
+  # the script's close path is idempotent.
   group: renovate-failure-issue-${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}
   cancel-in-progress: false
 jobs:

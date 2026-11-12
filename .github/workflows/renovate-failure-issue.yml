@@ -48,11 +48,13 @@ jobs:
         with:
           egress-policy: block
           disable-sudo: true
-          # TODO: confirm on a real failure that job logs still download; the
-          # logs endpoint answers with a redirect to a host outside this list,
-          # and the script then files the issue without the log tail.
+          # The job-logs endpoint redirects to a short-lived Azure Blob URL on a
+          # numbered productionresultssa<N> host, which no fixed list can name;
+          # without the wildcard every issue loses its log tail. The breadth is
+          # acceptable because the job runs only this repository's script,
+          # checked out at the commit the caller pinned.
           allowed-endpoints: >-
-            api.github.com:443 github.com:443 codeload.github.com:443
+            api.github.com:443 github.com:443 codeload.github.com:443 *.blob.core.windows.net:443
       # A called workflow runs in the caller's checkout, so the script is
       # fetched from this repository at the exact commit the caller pinned.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

@@ -53,6 +53,16 @@ function caller_if() {
       and .[0]["persist-credentials"] == false'
 }
 
+@test "reusable workflow: egress blocked except GitHub and the job-log blob hosts" {
+  # The job-logs endpoint redirects to numbered productionresultssa<N> hosts,
+  # so without the wildcard every issue would lose its log tail.
+  yaml_assert "${REUSABLE}" '[.jobs[].steps[] | select(.uses // "" | startswith("step-security/harden-runner@")) | .with]
+    | length == 1
+      and .[0]["egress-policy"] == "block"
+      and (.[0]["allowed-endpoints"] | split(" ") | map(select(. != "")) | sort)
+        == (["api.github.com:443","github.com:443","codeload.github.com:443","*.blob.core.windows.net:443"] | sort)'
+}
+
 @test "reusable workflow: uses only actions/* and harden-runner" {
   local uses
   uses="$(yq --output-format=json '.' "${REUSABLE}" | jq --raw-output '.jobs[].steps[] | .uses // empty')"
