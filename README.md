@@ -76,11 +76,19 @@ Emails are kept to a minimum:
 - When the PR closes, merged or not, the issue records the outcome and closes
   without a comment. It closes as completed if the PR merged and as not planned
   otherwise.
+- A failed run that is processed after its PR closed files nothing and closes
+  the PR's issue the same way, so the issue ends up closed whichever run comes
+  last.
 - GitHub emails when an issue opens and may email when it closes, so expect one
   or two emails per breakage.
 
 Issues are only filed for PRs from branches of the same repository, never for
 fork PRs.
+
+Runs that file or update issues are serialized per Renovate branch by a
+concurrency group on the caller's `open` job, so parallel failures cannot file
+duplicate issues. The `close` job has no group: a group keeps only one pending
+run, and a newer event would replace a pending close.
 
 ## Adopting it in a repo
 

@@ -22,13 +22,6 @@ on:
   pull_request_target:  # zizmor: ignore[dangerous-triggers]
     types: [closed]
 permissions: {}
-concurrency:
-  # One run per Renovate branch at a time, so parallel runs cannot file duplicate
-  # issues. cancel-in-progress: false keeps a newer event from killing a running
-  # job midway; a pending run can still be replaced by a newer one, which is why
-  # the script's close path is idempotent.
-  group: renovate-failure-issue-${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}
-  cancel-in-progress: false
 jobs:
   open:
     # At job level, so non-matching runs are skipped rather than billed. The
@@ -42,9 +35,22 @@ jobs:
       && github.event.workflow_run.head_repository.full_name == github.repository
       && contains(fromJSON('["failure", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
     permissions:
-      issues: write  # create or update the failure issue and its labels
+      issues: write  # create, update or close the failure issue; create its labels
       actions: read  # list the failed run's jobs and fetch their logs
       pull-requests: read  # find the PR for the failed branch
+    # One open run per Renovate branch at a time, so parallel failures cannot
+    # file duplicate issues. cancel-in-progress: false keeps a newer run from
+    # killing a running one midway, but a group holds only one pending run and
+    # a newer one replaces it. The close job has no group for that reason: a
+    # pending close could otherwise be replaced and never run. An open run that
+    # starts after its PR closed closes the issue itself, so whichever run comes
+    # last leaves it closed. GitHub's documentation does not say whether a job
+    # skipped by its if: still enters the group; if it does, the skipped open
+    # job of a green CI run or a PR close can replace a pending open run, and
+    # that one failure goes unreported.
+    concurrency:
+      group: renovate-failure-issue-${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}
+      cancel-in-progress: false
     uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
     with:
       mode: open

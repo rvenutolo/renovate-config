@@ -129,9 +129,17 @@ function caller_if() {
     and ([.jobs[].uses] | length == 2 and all(startswith("rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@")))'
 }
 
-@test "caller example: concurrency keyed on branch, not cancelling" {
-  yaml_assert "${CALLER}" '.concurrency.group == "renovate-failure-issue-${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}"
-    and .concurrency["cancel-in-progress"] == false'
+@test "caller example: no workflow-level concurrency" {
+  yaml_assert "${CALLER}" 'has("concurrency") | not'
+}
+
+@test "caller example: open job concurrency keyed on branch, not cancelling" {
+  yaml_assert "${CALLER}" '.jobs.open.concurrency.group == "renovate-failure-issue-${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}"
+    and .jobs.open.concurrency["cancel-in-progress"] == false'
+}
+
+@test "caller example: close job has no concurrency group" {
+  yaml_assert "${CALLER}" '.jobs.close | has("concurrency") | not'
 }
 
 @test "caller example: reusable workflow pinned by SHA with tag comment" {

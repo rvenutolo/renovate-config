@@ -73,12 +73,15 @@ function renovate_pr_body() {
 
 # @description Stub the pulls lookup with PR #7 in the given state.
 # @arg $1 state `open` or `closed`
+# @arg $2 merged_at optional merge timestamp; without it `merged_at` is null
 function stub_pr() {
-  local -r state="$1"
+  local -r state="$1" merged_at="${2:-}"
   local pr
   pr="$(jq --null-input --arg state "${state}" --arg body "$(renovate_pr_body)" \
+    --arg merged_at "${merged_at}" \
     '[{number: 7, state: $state, title: "chore(deps): update foo to v1.1.0",
-       html_url: "https://github.com/o/r/pull/7", body: $body}]')"
+       html_url: "https://github.com/o/r/pull/7", body: $body,
+       merged_at: (if $merged_at == "" then null else $merged_at end)}]')"
   stub_response GET 'repos/o/r/pulls' "${pr}"
 }
 
@@ -194,14 +197,47 @@ function assert_no_comment_calls() {
   fi
 }
 
-@test "open: PR already closed creates no issue" {
+@test "open: PR already closed with no failure issue creates no issue" {
   stub_pr closed
   stub_jobs '11:checks:failure'
   stub_labels_exist
   stub_issues '[]'
   run "${SCRIPT}" open
   assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
   assert_no_issue_writes
+}
+
+@test "open: PR already merged closes its failure issue as completed without comment" {
+  stub_pr closed '2026-11-10T12:00:00Z'
+  stub_jobs '11:checks:failure'
+  stub_labels_exist
+  stub_existing_issue 7 2
+  run "${SCRIPT}" open
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  request_json PATCH repos/o/r/issues/42 \
+    | jq --exit-status '.state == "closed" and .state_reason == "completed"'
+  local body
+  body="$(request_body PATCH repos/o/r/issues/42)"
+  assert_regex "${body}" '\*\*Outcome:\*\* merged'
+  assert_equal "$(head --lines=1 <<< "${body}")" '<!-- renovate-failure pr=7 count=2 -->'
+  assert_no_comment_calls
+}
+
+@test "open: PR closed unmerged closes its failure issue as not_planned" {
+  stub_pr closed
+  stub_jobs '11:checks:failure'
+  stub_labels_exist
+  stub_existing_issue 7 1
+  run "${SCRIPT}" open
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
+  request_json PATCH repos/o/r/issues/42 \
+    | jq --exit-status '.state == "closed" and .state_reason == "not_planned"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/42)" '\*\*Outcome:\*\* closed without merging'
+  assert_no_comment_calls
 }
 
 @test "open: no PR for branch is a no-op" {

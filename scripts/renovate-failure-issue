@@ -8,13 +8,15 @@
 #                <!-- renovate-failure pr=<N> count=<K> -->
 #
 #              `open` runs after a CI run on a `renovate/*` branch fails. It
-#              looks up the branch's PR and does nothing unless that PR is
-#              still open: a run can finish after its PR closed, and an issue
-#              filed then would never be closed. A first failure creates the
-#              issue; a repeat failure rewrites the body of the existing one
-#              and bumps the count. It never comments, because every comment
-#              emails the user and a broken PR re-fails after each merge in the
-#              window.
+#              looks up the branch's PR. If that PR is no longer open, it files
+#              nothing and instead closes the PR's failure issue as `close`
+#              would: a run can finish after its PR closed, and if that PR's
+#              close run never ran or ran too early, the issue would otherwise
+#              stay open. Whichever run comes last leaves it closed. Otherwise
+#              a first failure creates the issue; a repeat failure rewrites
+#              the body of the existing one and bumps the count. It never
+#              comments, because every comment emails the user and a broken PR
+#              re-fails after each merge in the window.
 #
 #              `close` runs when a Renovate PR closes. It records the outcome
 #              in the body and closes the issue as `completed` (merged) or
@@ -293,8 +295,9 @@ function render_body() {
       end'
 }
 
-# @description Handle a failed CI run: create or update the PR's failure issue.
-# @exitcode 0 the issue was written, or the PR is gone or closed
+# @description Handle a failed CI run: create or update the PR's failure issue,
+#              or close it when the PR is no longer open.
+# @exitcode 0 the issue was written or closed, or there was nothing to do
 function open_cmd() {
   require_env GITHUB_REPOSITORY RUN_ID RUN_URL HEAD_BRANCH RUN_CONCLUSION
   require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
@@ -312,7 +315,8 @@ function open_cmd() {
   pr_number="$(jq --raw-output '.number' "${WORK_DIR}/pr.json")"
   pr_state="$(jq --raw-output '.state' "${WORK_DIR}/pr.json")"
   if [[ "${pr_state}" != 'open' ]]; then
-    log "PR #${pr_number} is ${pr_state}; nothing to do"
+    log "PR #${pr_number} is ${pr_state}; closing its failure issue instead"
+    close_issue "${pr_number}" "$(jq --raw-output '.merged_at != null' "${WORK_DIR}/pr.json")"
     return 0
   fi
 
@@ -381,26 +385,22 @@ function open_cmd() {
   log "created failure issue for PR #${pr_number}"
 }
 
-# @description Handle a closed PR: record the outcome and close its failure
+# @description Record a closed PR's outcome in its failure issue and close the
 #              issue, if one is open.
+# @arg $1 pr the PR number
+# @arg $2 merged `true` or `false`, whether the PR was merged
 # @exitcode 0 the issue was closed, or none was open
-function close_cmd() {
-  require_env GITHUB_REPOSITORY PR_NUMBER PR_MERGED
-  require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
-  require_format PR_NUMBER '^[0-9]+$' 'a number'
-  require_format PR_MERGED '^(true|false)$' 'true or false'
-
+function close_issue() {
+  local -r pr="$1" merged="$2"
   local existing
-  # PR_NUMBER comes from the environment, checked by require_env above.
-  # shellcheck disable=SC2153
-  existing="$(find_issue "${PR_NUMBER}")"
+  existing="$(find_issue "${pr}")"
   if [[ -z "${existing}" ]]; then
-    log "no open failure issue for PR #${PR_NUMBER}; nothing to do"
+    log "no open failure issue for PR #${pr}; nothing to do"
     return 0
   fi
 
   local outcome='closed without merging' reason='not_planned'
-  if [[ "${PR_MERGED}" == 'true' ]]; then
+  if [[ "${merged}" == 'true' ]]; then
     outcome='merged'
     reason='completed'
   fi
@@ -411,7 +411,20 @@ function close_cmd() {
       body: ((.body // "" | sub("\\s+$"; "")) + "\n\n**Outcome:** \($outcome)\n")
     }' <<< "${existing}" \
     | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
-  log "closed issue #${issue_number} for PR #${PR_NUMBER} (${outcome})"
+  log "closed issue #${issue_number} for PR #${pr} (${outcome})"
+}
+
+# @description Handle a closed PR: record the outcome and close its failure
+#              issue, if one is open.
+# @exitcode 0 the issue was closed, or none was open
+function close_cmd() {
+  require_env GITHUB_REPOSITORY PR_NUMBER PR_MERGED
+  require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
+  require_format PR_NUMBER '^[0-9]+$' 'a number'
+  require_format PR_MERGED '^(true|false)$' 'true or false'
+  # PR_NUMBER comes from the environment, checked by require_env above.
+  # shellcheck disable=SC2153
+  close_issue "${PR_NUMBER}" "${PR_MERGED}"
 }
 
 function main() {
