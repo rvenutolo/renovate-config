@@ -35,3 +35,8 @@ function setup() {
   grep --fixed-strings --quiet \
     'rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@*' "${README}"
 }
+
+@test "readme: describes the stuck-PR sweep and its schedule" {
+  grep --fixed-strings --quiet 'is stuck' "${README}"
+  grep --fixed-strings --quiet '17 14 * * 1' "${README}"
+}

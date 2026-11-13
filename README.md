@@ -1,7 +1,8 @@
 # renovate-config
 
 Shared [Renovate](https://docs.renovatebot.com/) preset, plus a reusable
-GitHub Actions workflow that files an issue when CI fails on a Renovate PR.
+GitHub Actions workflow that files an issue when CI fails on a Renovate PR or
+when a Renovate PR is still stuck open after the weekly update window.
 
 The preset is `default.json`. Consuming repositories extend it with one line,
 pinned to a release tag.
@@ -82,7 +83,7 @@ Emails are kept to a minimum:
   the PR's issue the same way, so the issue ends up closed whichever run comes
   last.
 - GitHub emails when an issue opens and may email when it closes, so expect one
-  or two emails per breakage.
+  or two emails per breakage, and per stuck PR.
 
 Issues are only filed for PRs from branches of the same repository, never for
 fork PRs.
@@ -91,6 +92,35 @@ Runs that file or update issues are serialized per Renovate branch by a
 concurrency group on the caller's `open` job, so parallel failures cannot file
 duplicate issues. The `close` job has no group: a group keeps only one pending
 run, and a newer event would replace a pending close.
+
+### Stuck PRs
+
+Once a week, after the update window, the caller's `sweep` job looks for
+Renovate PRs that should have merged but did not. It runs on Monday at 14:17
+UTC (9:17am EST, 10:17am EDT), set by the cron `17 14 * * 1` in the caller,
+which a consumer may change; it can also be run by hand from the Actions tab.
+
+A PR counts as stuck when it is open, its branch is a `renovate/*` branch of
+the same repository, it is not a draft, GitHub auto-merge is still enabled on
+it, and it was opened at least 12 hours earlier. A PR taken off auto-merge on
+purpose is never reported.
+
+Each stuck PR gets one issue, with the same labels as a failure issue and a
+title of the form `Renovate PR #12 is stuck: ...`. The issue contains:
+
+- a link to the PR and the list of updates in it
+- when the PR was opened and when the sweep looked
+- the CI state of the PR's head commit (passing, pending, failing or none)
+- GitHub's mergeable state for the PR, such as `behind` or `dirty`
+- whether Renovate reported an artifact update problem on the PR
+- how to unstick it
+
+A PR that already has a failure issue is skipped. A sweep that finds the PR
+still stuck rewrites its issue without a comment; if CI later fails on the PR,
+the same issue becomes its failure issue. The sweep also closes, without a
+comment, every issue whose PR has closed (covering a missed `close` run) and
+every stuck issue whose PR no longer counts as stuck. A stuck issue closed by
+hand while its PR stays stuck is filed again by the next sweep.
 
 ## Adopting it in a repo
 
@@ -170,6 +200,9 @@ For each consuming repository:
 - **Branch protection** requiring branches to be up to date before merging, and
   **auto-merge** enabled on the repository. The preset assumes both.
 - **Dependabot alerts** turned on, which security-fix PRs depend on.
+- **Repository activity.** GitHub disables scheduled workflows in a public
+  repository after 60 days without activity, which would stop the sweep.
+  Renovate's merges normally keep a repository active.
 
 ## Releasing
 
@@ -197,9 +230,10 @@ variable `RELEASE_APP_CLIENT_ID` and its private key the repository secret
 
 ## Known gaps
 
-- Renovate artifact errors, such as a failed `nix flake update`, appear only as
-  Renovate's own PR comment and on the Dependency Dashboard. No issue is filed.
-- A Renovate PR that is green but never merges is not detected.
+- Renovate artifact errors, such as a failed `nix flake update`, get no issue of
+  their own. On a PR that stays open, the stuck issue notes Renovate's
+  artifact-problem comment; a PR that merges despite the error, because CI
+  passed, is not reported.
 - That a `startup_failure` run fires `workflow_run: completed` is not confirmed
   by GitHub's documentation. The caller's `if:` accepts it, but a startup
   failure may produce no issue.
