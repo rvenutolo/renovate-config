@@ -593,8 +593,12 @@ function open_prs() {
 }
 
 # @description After the update window: file or refresh an issue for every
-#              stuck Renovate PR.
-# @exitcode 0 every stuck PR's issue was written, or there was nothing to do
+#              stuck Renovate PR, then close the issues that no longer apply:
+#              every issue whose PR has closed, as `close` would, which covers
+#              a missed `close` run and duplicates alike; and every stuck
+#              issue whose PR is open but no longer counts as stuck. A failure
+#              issue on an open PR is left to `open` and `close`.
+# @exitcode 0 every issue was written or closed, or there was nothing to do
 function sweep_cmd() {
   require_env GITHUB_REPOSITORY
   require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
@@ -620,6 +624,52 @@ function sweep_cmd() {
       "${WORK_DIR}/prs.json" > "${WORK_DIR}/stuck/${number}.json"
     write_stuck_issue "${WORK_DIR}/stuck/${number}.json"
   done
+
+  open_issues > "${WORK_DIR}/issues.json"
+  jq --compact-output --slurpfile prs "${WORK_DIR}/prs.json" --rawfile stuck "${WORK_DIR}/stuck.txt" '
+    ($prs[0] | map(.number)) as $open
+    | ($stuck | split("\n") | map(select(. != "") | tonumber)) as $stuck
+    | .[] | .pr as $p
+    | if any($open[]; . == $p) | not then {issue: ., pr: $p, why: "closed"}
+      elif .count == 0 and (any($stuck[]; . == $p) | not) then {issue: ., pr: $p, why: "not-stuck"}
+      else empty end' "${WORK_DIR}/issues.json" > "${WORK_DIR}/stale.jsonl"
+  local -a stale
+  mapfile -t stale < "${WORK_DIR}/stale.jsonl"
+  local entry issue pr why
+  for entry in "${stale[@]}"; do
+    issue="$(jq --compact-output '.issue' <<< "${entry}")"
+    pr="$(jq --raw-output '.pr' <<< "${entry}")"
+    why="$(jq --raw-output '.why' <<< "${entry}")"
+    if [[ "${why}" == 'not-stuck' ]]; then
+      finish_issue "${issue}" "${pr}" 'no longer stuck: auto-merge is off or the PR is a draft' 'not_planned'
+      continue
+    fi
+    gh_api "repos/${GITHUB_REPOSITORY}/pulls/${pr}" > "${WORK_DIR}/closed-pr.json"
+    case "$(jq --raw-output 'if .state == "open" then "open" elif .merged_at != null then "merged" else "closed" end' \
+      "${WORK_DIR}/closed-pr.json")" in
+      merged) finish_issue "${issue}" "${pr}" 'merged' 'completed' ;;
+      closed) finish_issue "${issue}" "${pr}" 'closed without merging' 'not_planned' ;;
+      *) log "PR #${pr} opened after the PR listing; leaving its issue" ;;
+    esac
+  done
+}
+
+# @description Append an outcome line to an issue's body and close it,
+#              without a comment.
+# @arg $1 issue the issue as `{number, body, ...}` JSON
+# @arg $2 pr the PR number, for the log line
+# @arg $3 outcome the outcome text
+# @arg $4 reason the GitHub `state_reason`, `completed` or `not_planned`
+function finish_issue() {
+  local -r issue="$1" pr="$2" outcome="$3" reason="$4"
+  local issue_number
+  issue_number="$(jq --raw-output '.number' <<< "${issue}")"
+  jq --compact-output --arg outcome "${outcome}" --arg reason "${reason}" '{
+      state: "closed", state_reason: $reason,
+      body: ((.body // "" | sub("\\s+$"; "")) + "\n\n**Outcome:** \($outcome)\n")
+    }' <<< "${issue}" \
+    | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
+  log "closed issue #${issue_number} for PR #${pr} (${outcome})"
 }
 
 # @description Record a closed PR's outcome in its failure issue and close the
@@ -641,14 +691,7 @@ function close_issue() {
     outcome='merged'
     reason='completed'
   fi
-  local issue_number
-  issue_number="$(jq --raw-output '.number' <<< "${existing}")"
-  jq --compact-output --arg outcome "${outcome}" --arg reason "${reason}" '{
-      state: "closed", state_reason: $reason,
-      body: ((.body // "" | sub("\\s+$"; "")) + "\n\n**Outcome:** \($outcome)\n")
-    }' <<< "${existing}" \
-    | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
-  log "closed issue #${issue_number} for PR #${pr} (${outcome})"
+  finish_issue "${existing}" "${pr}" "${outcome}" "${reason}"
 }
 
 # @description Handle a closed PR: record the outcome and close its failure

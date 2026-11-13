@@ -257,6 +257,24 @@ function stub_sweep() {
   stub_response POST 'repos/o/r/issues' '{"number":42}'
 }
 
+# @description Print an open issue as the issues list returns it, with a
+#              marker line naming a PR.
+# @arg $1 number the issue number
+# @arg $2 marker_fields the marker fields after `renovate-failure`, e.g.
+#         `pr=7 count=0`
+# @stdout the issue as compact JSON
+function marker_issue() {
+  jq --null-input --compact-output --argjson n "$1" --arg fields "$2" \
+    '{number: $n, body: "<!-- renovate-failure \($fields) -->\nold body"}'
+}
+
+# @description Stub the single-PR GET for a closed PR #7.
+# @arg $1 merged_at the merge timestamp, or empty for closed unmerged
+function stub_closed_pr7() {
+  stub_response GET 'repos/o/r/pulls/7' "$(jq --null-input --arg m "$1" \
+    '{number: 7, state: "closed", merged_at: (if $m == "" then null else $m end)}')"
+}
+
 @test "open: PR already closed with no failure issue creates no issue" {
   stub_pr closed
   stub_jobs '11:checks:failure'
@@ -868,6 +886,83 @@ function stub_sweep() {
   assert_success
   run grep --after-context=1 '^CALL GET repos/o/r/issues/7/comments' "${GH_STUB_DIR}/calls.log"
   assert_line --regexp '^ARGV:.* --paginate '
+}
+
+@test "sweep: an issue whose PR merged is closed as completed" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 'pr=7 count=2')]"
+  stub_closed_pr7 '2026-11-09T12:00:00Z'
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" sweep
+  assert_success
+  request_json PATCH repos/o/r/issues/42 \
+    | jq --exit-status '.state == "closed" and .state_reason == "completed"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/42)" '\*\*Outcome:\*\* merged'
+  assert_no_comment_calls
+}
+
+@test "sweep: an issue whose PR closed unmerged is closed as not_planned" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 'pr=7 count=0')]"
+  stub_closed_pr7 ''
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" sweep
+  assert_success
+  request_json PATCH repos/o/r/issues/42 \
+    | jq --exit-status '.state == "closed" and .state_reason == "not_planned"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/42)" '\*\*Outcome:\*\* closed without merging'
+}
+
+@test "sweep: a stuck issue whose PR lost auto-merge is closed as not_planned" {
+  stub_sweep '.auto_merge = null'
+  stub_issues "[$(marker_issue 42 'pr=7 count=0')]"
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  request_json PATCH repos/o/r/issues/42 \
+    | jq --exit-status '.state == "closed" and .state_reason == "not_planned"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/42)" '\*\*Outcome:\*\* no longer stuck'
+}
+
+@test "sweep: a failure issue on a non-stuck open PR is untouched" {
+  stub_sweep '.auto_merge = null'
+  stub_issues "[$(marker_issue 42 'pr=7 count=1')]"
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: every duplicate issue for a closed PR is closed" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 'pr=7 count=0'), $(marker_issue 43 'pr=7 count=0')]"
+  stub_closed_pr7 ''
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  stub_response PATCH 'repos/o/r/issues/43' '{"number":43}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  assert_equal "$(call_count PATCH repos/o/r/issues/43)" 1
+}
+
+@test "sweep: a duplicate pair on a stuck PR updates only the oldest" {
+  stub_sweep
+  stub_issues "[$(marker_issue 43 'pr=7 count=0'), $(marker_issue 42 'pr=7 count=0')]"
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  stub_response PATCH 'repos/o/r/issues/43' '{"number":43}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  assert_equal "$(call_count PATCH repos/o/r/issues/43)" 0
+}
+
+@test "sweep: a done issue is never touched" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 "pr=7 count=0 artifact=${HEAD_SHA} done=1")]"
+  stub_closed_pr7 '2026-11-09T12:00:00Z'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
 }
 
 @test "usage: unknown subcommand exits 2" {
