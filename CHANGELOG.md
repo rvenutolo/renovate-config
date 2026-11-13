@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0](https://github.com/rvenutolo/renovate-config/compare/v1.0.0...v1.1.0) (2026-11-13)
+
+
+### Features
+
+* accept optional artifact and done fields in the issue marker ([db5ac44](https://github.com/rvenutolo/renovate-config/commit/db5ac44a8e8e8962a7ef110ad322fc786bc297f1))
+* add a sweep mode that files issues for stuck Renovate PRs ([bc2bdc7](https://github.com/rvenutolo/renovate-config/commit/bc2bdc77a142f53bb8c0fc3c94f3e3000fbf08f0))
+* close issues for closed or no-longer-stuck PRs during the sweep ([d0490e4](https://github.com/rvenutolo/renovate-config/commit/d0490e4a2434a965e51d8c1833374f365425a7d4))
+* report CI, mergeability and artifact problems in stuck issues ([ec6a889](https://github.com/rvenutolo/renovate-config/commit/ec6a88928f66fe6feac43ce7ded63cc8aa68427c))
+* report Renovate PRs that are stuck after the update window ([#8](https://github.com/rvenutolo/renovate-config/issues/8)) ([b90fd74](https://github.com/rvenutolo/renovate-config/commit/b90fd74ba23c158ad785b6b12af60af3372365ad))
+* run the stuck-PR sweep weekly from the caller workflow ([08012c0](https://github.com/rvenutolo/renovate-config/commit/08012c09278e4553a008b9424636b16016576aaa))
+
+
+### Bug Fixes
+
+* stop the sweep hiding failed lookups or halting on a missing PR ([2518847](https://github.com/rvenutolo/renovate-config/commit/25188477c218a535e23daa11b15b02bb118f1189))
+
 ## 1.0.0 (2026-11-12)
 
 
