@@ -33,7 +33,7 @@ function setup() {
   export RUN_URL='https://github.com/o/r/actions/runs/1001'
   export HEAD_BRANCH='renovate/foo-1.x'
   export RUN_CONCLUSION='failure'
-  unset LOG_TAIL_LINES PR_NUMBER PR_MERGED
+  unset LOG_TAIL_LINES PR_NUMBER PR_MERGED SWEEP_MIN_AGE_HOURS SWEEP_MERGEABLE_TRIES SWEEP_RETRY_DELAY
 }
 
 # @description Write one canned stub response.
@@ -196,6 +196,63 @@ function assert_no_comment_calls() {
     run grep '^CALL POST .*comments' "${GH_STUB_DIR}/calls.log"
     assert_failure
   fi
+}
+
+# The head commit of every sweep fixture PR.
+readonly HEAD_SHA='0123456789abcdef0123456789abcdef01234567'
+
+# @description Print a UTC timestamp the given number of hours ago.
+# @arg $1 hours how many hours back
+# @stdout the ISO 8601 timestamp
+function iso_hours_ago() {
+  date --utc --date="-$1 hours" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+# @description Print one open PR as the pulls list returns it: a stuck
+#              Renovate PR unless the overrides say otherwise.
+# @arg $1 number the PR number
+# @arg $2 overrides optional jq filter applied to the PR, e.g. `.draft = true`
+# @stdout the PR as compact JSON
+function sweep_pr() {
+  local -r number="$1" overrides="${2:-.}"
+  jq --null-input --compact-output --argjson number "${number}" \
+    --arg body "$(renovate_pr_body)" --arg created "$(iso_hours_ago 13)" --arg sha "${HEAD_SHA}" \
+    "{number: \$number, state: \"open\", draft: false, title: \"chore(deps): update foo to v1.1.0\",
+      html_url: \"https://github.com/o/r/pull/\\(\$number)\", body: \$body, created_at: \$created,
+      auto_merge: {merge_method: \"squash\"}, user: {login: \"renovate[bot]\"},
+      head: {ref: \"renovate/foo-1.x\", sha: \$sha, repo: {full_name: \"o/r\"}}} | ${overrides}"
+}
+
+# @description Stub the open-PR listing.
+# @arg $1 prs JSON array of PRs
+function stub_open_prs() {
+  stub_response GET 'repos/o/r/pulls' "$1"
+}
+
+# @description Stub the per-PR lookups a sweep makes for one PR: the single-PR
+#              GET (clean mergeable state), the head's combined status and
+#              check runs (passing), and no comments.
+# @arg $1 number the PR number
+function stub_sweep_details() {
+  local -r number="$1"
+  stub_response GET "repos/o/r/pulls/${number}" \
+    "$(jq --null-input --argjson n "${number}" '{number: $n, state: "open", mergeable_state: "clean"}')"
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/status" '{"state":"success","total_count":1}'
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/check-runs" \
+    '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
+  stub_response GET "repos/o/r/issues/${number}/comments" '[]'
+}
+
+# @description Stub a sweep over one PR #7 built by sweep_pr with the given
+#              overrides, existing labels, no existing issue and a successful
+#              issue create.
+# @arg $1 overrides optional jq filter for the PR
+function stub_sweep() {
+  stub_open_prs "[$(sweep_pr 7 "${1:-.}")]"
+  stub_sweep_details 7
+  stub_labels_exist
+  stub_issues '[]'
+  stub_response POST 'repos/o/r/issues' '{"number":42}'
 }
 
 @test "open: PR already closed with no failure issue creates no issue" {
@@ -596,6 +653,129 @@ function assert_no_comment_calls() {
   assert_success
   assert_equal "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/42)")" '<!-- renovate-failure pr=7 count=1 -->'
   request_json PATCH repos/o/r/issues/42 | jq --exit-status '.title | startswith("Renovate PR #7 failed CI: ")'
+}
+
+@test "sweep: no open PRs and no issues writes nothing" {
+  stub_open_prs '[]'
+  stub_issues '[]'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a stuck PR gets a labeled issue with count 0" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+  request_json POST repos/o/r/issues \
+    | jq --exit-status '.labels == ["dependencies","renovate-failure"]
+      and .title == "Renovate PR #7 is stuck: chore(deps): update foo to v1.1.0"'
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  assert_equal "$(head --lines=1 <<< "${body}")" '<!-- renovate-failure pr=7 count=0 -->'
+  assert_regex "${body}" 'https://github\.com/o/r/pull/7'
+  assert_regex "${body}" '\| \[foo\]\(https://example\.com/foo\) \| dependencies \| minor \|'
+  [[ "${body}" != *RELEASE_NOTES_MARKER* ]] || fail 'release notes leaked past the --- rule'
+  assert_regex "${body}" '## How to unstick it'
+}
+
+@test "sweep: a repeat sweep edits the stuck issue silently" {
+  stub_sweep
+  stub_existing_issue 7 0
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
+  assert_no_comment_calls
+  assert_equal "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/42)")" '<!-- renovate-failure pr=7 count=0 -->'
+}
+
+@test "sweep: a PR with a failure issue is skipped" {
+  stub_sweep
+  stub_existing_issue 7 2
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a PR with auto-merge off is not stuck" {
+  stub_sweep '.auto_merge = null'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a draft PR is not stuck" {
+  stub_sweep '.draft = true'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a PR younger than the minimum age is not stuck" {
+  stub_sweep ".created_at = \"$(iso_hours_ago 1)\""
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: SWEEP_MIN_AGE_HOURS sets the minimum age" {
+  export SWEEP_MIN_AGE_HOURS=2
+  stub_sweep ".created_at = \"$(iso_hours_ago 3)\""
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+}
+
+@test "sweep: a non-renovate branch is not stuck" {
+  stub_sweep '.head.ref = "feature/x"'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a fork PR is not stuck" {
+  stub_sweep '.head.repo.full_name = "evil/r"'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a PR whose head repo is gone is skipped" {
+  stub_sweep '.head.repo = null'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: listings are paginated" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  run grep --after-context=1 --extended-regexp '^CALL GET repos/o/r/(pulls|issues)\?' "${GH_STUB_DIR}/calls.log"
+  assert_line --regexp '^ARGV:.* --paginate .*repos/o/r/pulls\?'
+  assert_line --regexp '^ARGV:.* --paginate .*repos/o/r/issues\?'
+}
+
+@test "sweep: a long PR title is truncated to 256 characters" {
+  stub_sweep '.title = ("x" * 300)'
+  run "${SCRIPT}" sweep
+  assert_success
+  request_json POST repos/o/r/issues | jq --exit-status '(.title | length) == 256 and (.title | endswith("…"))'
+}
+
+@test "sweep: never posts a comment" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_comment_calls
+}
+
+@test "usage: an invalid SWEEP_MIN_AGE_HOURS exits 2" {
+  export SWEEP_MIN_AGE_HOURS=abc
+  run "${SCRIPT}" sweep
+  assert_failure 2
 }
 
 @test "usage: unknown subcommand exits 2" {

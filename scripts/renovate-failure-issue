@@ -24,15 +24,26 @@
 #              no matching open issue it does nothing, so a repeated or
 #              re-queued run is harmless.
 #
+#              `sweep` runs on a schedule after the update window closes. It
+#              files an issue, with `count=0` and a "stuck" title, for every
+#              open Renovate PR that should have merged by then: a
+#              `renovate/*` branch of this repository, not a draft, GitHub
+#              auto-merge enabled, and opened at least SWEEP_MIN_AGE_HOURS
+#              ago. A PR that already has a failure issue (`count` 1 or more)
+#              is skipped; a repeat sweep rewrites the stuck issue silently,
+#              and a later CI failure turns it into a failure issue.
+#
 #              Branch names, PR titles and bodies, job names and job logs are
 #              untrusted: they reach jq only through --arg, --rawfile or stdin,
 #              and reach gh only as request bodies on stdin, never as program
 #              text or as part of a command line other than the URL-encoded
 #              branch in the PR lookup.
-# @arg $1 subcommand `open` or `close`
+# @arg $1 subcommand `open`, `close` or `sweep`
 # @env GITHUB_REPOSITORY `owner/repo`, both subcommands
 # @env RUN_ID, RUN_URL, HEAD_BRANCH, RUN_CONCLUSION the failed run, for `open`;
 #      RUN_CONCLUSION is one of `failure`, `timed_out`, `startup_failure`
+# @env SWEEP_MIN_AGE_HOURS optional, for `sweep`: how many hours a PR must
+#      have been open to count as stuck; default 12
 # @env PR_NUMBER, PR_MERGED the closed PR, for `close`; PR_MERGED is `true` or
 #      `false`
 # @env LOG_TAIL_LINES optional, how many trailing lines of each failed job's
@@ -66,6 +77,19 @@ readonly TRUNCATION_NOTE="_Log output truncated to fit GitHub's issue size limit
 # shellcheck disable=SC2016
 readonly HOW_TO_FIX='Fix the problem on `main`, then tick the rebase checkbox in the PR; a manual rebase request overrides the schedule. Alternatively, push the fix to the Renovate branch: Renovate stops rebasing a branch with foreign commits, but GitHub auto-merge stays armed, so once CI is green the PR merges by itself as long as it is up to date with `main`.'
 
+# The backticks are Markdown code spans, not command substitutions.
+# shellcheck disable=SC2016
+readonly HOW_TO_UNSTICK='Find out why the PR did not merge: a failing or pending check, a merge conflict, or a branch behind `main` that no Renovate run rebased during the window. Tick the rebase checkbox in the PR to have Renovate rebase it now; a manual rebase request overrides the schedule. If the PR cannot merge as it is, fix the problem on `main` or push the fix to the Renovate branch, and GitHub auto-merge merges it once CI is green and the branch is up to date.'
+# jq: whether an open PR counts as stuck. head.repo is null when the head
+# repository was deleted, which compares unequal to $repo. The $names are jq's.
+# shellcheck disable=SC2016
+readonly IS_STUCK='def is_stuck($repo; $cutoff):
+  ((.head.ref // "") | startswith("renovate/"))
+  and .head.repo.full_name == $repo
+  and .draft == false
+  and .auto_merge != null
+  and ((.created_at | fromdateiso8601) <= $cutoff);'
+
 WORK_DIR=''
 
 # @description Log one line to stderr.
@@ -81,7 +105,7 @@ function log() {
 # @exitcode 2 always
 function usage_error() {
   log "$1"
-  printf 'usage: %s open|close (configured through the environment)\n' "${0##*/}" >&2
+  printf 'usage: %s open|close|sweep (configured through the environment)\n' "${0##*/}" >&2
   exit 2
 }
 
@@ -217,23 +241,67 @@ function ensure_label() {
   api_error "creating label ${name} failed"
 }
 
-# @description Print the open failure issue whose marker names the given PR,
-#              the oldest one if there are several, or nothing. The marker may
-#              carry the optional fields ` artifact=<sha>` and then ` done=1`
-#              after the count; an issue marked `done=1` is finished and
-#              counts as absent.
+# @description Print every open, unfinished failure issue: those labeled
+#              FAILURE_LABEL whose body starts with the marker line. The
+#              marker may carry the optional fields ` artifact=<sha>` and then
+#              ` done=1` after the count; an issue marked `done=1` is finished
+#              and left out.
+# @stdout compact JSON array of `{number, pr, count, body}`
+function open_issues() {
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=${FAILURE_LABEL}&state=open&per_page=100" \
+    | jq --slurp --compact-output '
+      [ add // [] | .[] | select(.pull_request == null)
+        | ((.body // "") | (split("\n")[0] // "") | sub("\r$"; "")
+           | capture("^<!-- renovate-failure pr=(?<pr>[0-9]+) count=(?<count>[0-9]+)(?: artifact=(?<artifact>[0-9a-f]{40}))?(?<done> done=1)? -->$")) as $m
+        | select($m.done == null)
+        | {number, pr: ($m.pr | tonumber), count: ($m.count | tonumber), body}
+      ]'
+}
+
+# @description Print the open, unfinished failure issue whose marker names the
+#              given PR, the oldest one if there are several, or nothing.
 # @arg $1 pr the PR number
 # @stdout compact JSON `{number, count, body}`, or nothing
 function find_issue() {
   local -r pr="$1"
-  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=${FAILURE_LABEL}&state=open&per_page=100" \
-    | jq --slurp --compact-output --arg pr "${pr}" '
-      [ add // [] | .[] | select(.pull_request == null)
-        | ((.body // "") | (split("\n")[0] // "") | sub("\r$"; "")
-           | capture("^<!-- renovate-failure pr=(?<pr>[0-9]+) count=(?<count>[0-9]+)(?: artifact=(?<artifact>[0-9a-f]{40}))?(?<done> done=1)? -->$")) as $m
-        | select($m.pr == $pr and $m.done == null)
-        | {number, count: ($m.count | tonumber), body}
-      ] | min_by(.number) // empty'
+  open_issues | jq --compact-output --argjson pr "${pr}" '
+    map(select(.pr == $pr)) | min_by(.number) // empty | {number, count, body}'
+}
+
+# @description Print an issue title for a PR, cut to TITLE_LIMIT.
+# @arg $1 what what happened to the PR, e.g. `failed CI`
+# @stdin the PR as JSON
+# @stdout the title
+function issue_title() {
+  local -r what="$1"
+  jq --raw-output --arg what "${what}" --argjson limit "${TITLE_LIMIT}" '
+    "Renovate PR #\(.number) \($what): \(.title)"
+    | if length > $limit then .[:$limit - 1] + "…" else . end'
+}
+
+# @description Create the PR's issue with both labels, or rewrite the title
+#              and body of the existing one.
+# @arg $1 existing the existing issue as `{number, ...}` JSON, or empty
+# @arg $2 title the issue title
+# @arg $3 body_file the file holding the issue body
+# @stdout the issue number on update, or nothing on create
+function upsert_issue() {
+  local -r existing="$1" title="$2" body_file="$3"
+  if [[ -n "${existing}" ]]; then
+    local issue_number
+    issue_number="$(jq --raw-output '.number' <<< "${existing}")"
+    jq --null-input --arg title "${title}" --rawfile body "${body_file}" \
+      '{title: $title, body: $body}' \
+      | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
+    printf '%s\n' "${issue_number}"
+    return 0
+  fi
+  ensure_label "${DEPENDENCIES_LABEL}" '0366d6' 'Dependency updates'
+  ensure_label "${FAILURE_LABEL}" 'd73a4a' 'A Renovate PR whose CI failed'
+  jq --null-input --arg title "${title}" --rawfile body "${body_file}" \
+    --arg dependencies "${DEPENDENCIES_LABEL}" --arg failure "${FAILURE_LABEL}" \
+    '{title: $title, body: $body, labels: [$dependencies, $failure]}' \
+    | gh_api --method POST "repos/${GITHUB_REPOSITORY}/issues" --input - > /dev/null
 }
 
 # @description Render the issue body, shortening the log tails, longest first,
@@ -369,28 +437,97 @@ function open_cmd() {
           jobs: $docs[1:] }' \
     | render_body > "${WORK_DIR}/body.md"
 
-  local title
-  title="$(jq --raw-output --argjson limit "${TITLE_LIMIT}" '
-    "Renovate PR #\(.number) failed CI: \(.title)"
-    | if length > $limit then .[:$limit - 1] + "…" else . end' "${WORK_DIR}/pr.json")"
+  local title updated
+  title="$(issue_title 'failed CI' < "${WORK_DIR}/pr.json")"
+  updated="$(upsert_issue "${existing}" "${title}" "${WORK_DIR}/body.md")"
+  if [[ -n "${updated}" ]]; then
+    log "updated issue #${updated} for PR #${pr_number} (failure ${count})"
+  else
+    log "created failure issue for PR #${pr_number}"
+  fi
+}
 
-  if [[ -n "${existing}" ]]; then
-    local issue_number
-    issue_number="$(jq --raw-output '.number' <<< "${existing}")"
-    jq --null-input --arg title "${title}" --rawfile body "${WORK_DIR}/body.md" \
-      '{title: $title, body: $body}' \
-      | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
-    log "updated issue #${issue_number} for PR #${pr_number} (failure ${count})"
+# @description Render a stuck issue's body.
+# @stdin JSON `{pr: {number, html_url}, updates}`
+# @stdout the body
+function render_stuck_body() {
+  jq --raw-output --arg how_to_unstick "${HOW_TO_UNSTICK}" '
+    [ "<!-- renovate-failure pr=\(.pr.number) count=0 -->",
+      "Renovate PR #\(.pr.number) is still open after the update window, with GitHub auto-merge enabled.",
+      "",
+      "**PR:** \(.pr.html_url)",
+      "",
+      "## Updates in this PR",
+      "",
+      (if .updates == "" then "_The PR body does not list its updates; see the PR._" else .updates end),
+      "",
+      "## How to unstick it",
+      "",
+      $how_to_unstick
+    ] | join("\n") + "\n"'
+}
+
+# @description File or rewrite the stuck issue for one PR, unless the PR
+#              already has a failure issue.
+# @arg $1 pr_file the file holding the PR as the pulls list returns it
+function write_stuck_issue() {
+  local -r pr_file="$1"
+  local pr_number
+  pr_number="$(jq --raw-output '.number' "${pr_file}")"
+  pr_updates_table < "${pr_file}" > "${WORK_DIR}/updates.md"
+  jq --compact-output --rawfile updates "${WORK_DIR}/updates.md" '
+    {pr: {number, html_url}, updates: ($updates | sub("\n$"; ""))}' "${pr_file}" \
+    | render_stuck_body > "${WORK_DIR}/body.md"
+
+  # Looked up last, right before the write, to narrow the race with an open
+  # run filing a failure issue for the same PR.
+  local existing
+  existing="$(find_issue "${pr_number}")"
+  if [[ -n "${existing}" ]] && (($(jq '.count' <<< "${existing}") >= 1)); then
+    log "PR #${pr_number} already has a failure issue; skipping"
     return 0
   fi
+  local title updated
+  title="$(issue_title 'is stuck' < "${pr_file}")"
+  updated="$(upsert_issue "${existing}" "${title}" "${WORK_DIR}/body.md")"
+  if [[ -n "${updated}" ]]; then
+    log "updated stuck issue #${updated} for PR #${pr_number}"
+  else
+    log "created stuck issue for PR #${pr_number}"
+  fi
+}
 
-  ensure_label "${DEPENDENCIES_LABEL}" '0366d6' 'Dependency updates'
-  ensure_label "${FAILURE_LABEL}" 'd73a4a' 'A Renovate PR whose CI failed'
-  jq --null-input --arg title "${title}" --rawfile body "${WORK_DIR}/body.md" \
-    --arg dependencies "${DEPENDENCIES_LABEL}" --arg failure "${FAILURE_LABEL}" \
-    '{title: $title, body: $body, labels: [$dependencies, $failure]}' \
-    | gh_api --method POST "repos/${GITHUB_REPOSITORY}/issues" --input - > /dev/null
-  log "created failure issue for PR #${pr_number}"
+# @description Print every open PR in this repository.
+# @stdout compact JSON array of PRs
+function open_prs() {
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+    | jq --slurp --compact-output 'add // []'
+}
+
+# @description After the update window: file or refresh an issue for every
+#              stuck Renovate PR.
+# @exitcode 0 every stuck PR's issue was written, or there was nothing to do
+function sweep_cmd() {
+  require_env GITHUB_REPOSITORY
+  require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
+  SWEEP_MIN_AGE_HOURS="${SWEEP_MIN_AGE_HOURS:-12}"
+  require_format SWEEP_MIN_AGE_HOURS '^[0-9]+$' 'a whole number of hours'
+
+  local -i cutoff
+  cutoff=$(($(date --utc '+%s') - SWEEP_MIN_AGE_HOURS * 3600))
+  open_prs > "${WORK_DIR}/prs.json"
+  mkdir "${WORK_DIR}/stuck"
+  jq --raw-output --arg repo "${GITHUB_REPOSITORY}" --argjson cutoff "${cutoff}" \
+    "${IS_STUCK}"' .[] | select(is_stuck($repo; $cutoff)) | .number' "${WORK_DIR}/prs.json" \
+    > "${WORK_DIR}/stuck.txt"
+  local -a numbers
+  mapfile -t numbers < "${WORK_DIR}/stuck.txt"
+  local number
+  for number in "${numbers[@]}"; do
+    jq --compact-output --argjson n "${number}" '.[] | select(.number == $n)' \
+      "${WORK_DIR}/prs.json" > "${WORK_DIR}/stuck/${number}.json"
+    write_stuck_issue "${WORK_DIR}/stuck/${number}.json"
+  done
 }
 
 # @description Record a closed PR's outcome in its failure issue and close the
@@ -438,7 +575,7 @@ function close_cmd() {
 function main() {
   local -r subcommand="${1:-}"
   case "${subcommand}" in
-    open | close) ;;
+    open | close | sweep) ;;
     *) usage_error "unknown subcommand: ${subcommand:-<none>}" ;;
   esac
   if (($# > 1)); then
