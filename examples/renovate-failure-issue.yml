@@ -34,9 +34,11 @@ jobs:
   open:
     # At job level, so non-matching runs are skipped rather than billed. The
     # same-repository check keeps a fork PR from a branch named renovate/x from
-    # putting attacker-controlled log text into an issue. startup_failure is what
-    # a CI action bump outside the Actions allowlist produces; cancelled is
-    # deliberately ignored.
+    # putting attacker-controlled log text into an issue. cancelled is
+    # deliberately ignored. startup_failure, what a CI action bump outside the
+    # Actions allowlist produces, is accepted, but GitHub fires no workflow_run
+    # event for a run that fails at startup; the sweep job reports such a PR as
+    # stuck instead.
     if: |-
       github.event_name == 'workflow_run'
       && startsWith(github.event.workflow_run.head_branch, 'renovate/')
@@ -52,10 +54,9 @@ jobs:
     # a newer one replaces it. The close job has no group for that reason: a
     # pending close could otherwise be replaced and never run. An open run that
     # starts after its PR closed closes the issue itself, so whichever run comes
-    # last leaves it closed. GitHub's documentation does not say whether a job
-    # skipped by its if: still enters the group; if it does, the skipped open
-    # job of a green CI run or a PR close can replace a pending open run, and
-    # that one failure goes unreported.
+    # last leaves it closed. A job skipped by its if: does not enter the group,
+    # so the skipped open job of a green CI run, a PR close or a sweep cannot
+    # replace a pending open run.
     concurrency:
       group: renovate-failure-issue-${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}
       cancel-in-progress: false

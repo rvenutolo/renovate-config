@@ -65,8 +65,8 @@ issue is labeled `dependencies` and `renovate-failure` and contains:
   (shortened further if the issue would exceed GitHub's size limit)
 - how to land a fix
 
-A run with conclusion `failure`, `timed_out` or `startup_failure` counts as a
-failure; `cancelled` is ignored. If a job's log cannot be fetched, the issue is
+A run with conclusion `failure` or `timed_out` counts as a failure; `cancelled`
+is ignored. If a job's log cannot be fetched, the issue is
 still filed, with a note in that job's section.
 
 Job-log downloads redirect to numbered Azure Blob hosts, which is why the
@@ -233,13 +233,17 @@ variable `RELEASE_APP_CLIENT_ID` and its private key the repository secret
 
 ## Known gaps
 
-- Renovate artifact errors, such as a failed `nix flake update`, get no issue of
-  their own. On a PR that stays open, the stuck issue notes Renovate's
-  artifact-problem comment; a PR that merges despite the error, because CI
-  passed, is not reported.
-- That a `startup_failure` run fires `workflow_run: completed` is not confirmed
-  by GitHub's documentation. The caller's `if:` accepts it, but a startup
-  failure may produce no issue.
+- Renovate artifact errors get no issue of their own.
+  - A failed `nix flake update` leaves nothing to commit, so Renovate opens no
+    branch or PR. The error shows only under "Repository Problems" on the
+    Dependency Dashboard.
+  - For a manager whose package file still changes, Renovate opens the PR with
+    an artifact-problem comment. If the PR stays open, its stuck issue notes the
+    comment; if CI passes and it merges, nothing is reported.
+- A CI run that fails at startup, such as one using an action outside the
+  Actions allowlist, fires no `workflow_run` event, so it gets no failure issue.
+  The PR stays open with auto-merge armed, and the next sweep files a stuck
+  issue for it.
 
 ## Development
 
