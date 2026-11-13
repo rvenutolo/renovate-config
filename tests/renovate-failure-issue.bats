@@ -189,10 +189,11 @@ function assert_no_issue_writes() {
   fi
 }
 
-# @description Fail if calls.log records any call to a comments path.
+# @description Fail if calls.log records any comment being posted. Reading
+#              comments is allowed.
 function assert_no_comment_calls() {
   if [[ -f "${GH_STUB_DIR}/calls.log" ]]; then
-    run grep '^CALL .*comments' "${GH_STUB_DIR}/calls.log"
+    run grep '^CALL POST .*comments' "${GH_STUB_DIR}/calls.log"
     assert_failure
   fi
 }
@@ -567,6 +568,34 @@ function assert_no_comment_calls() {
   run "${SCRIPT}" close
   assert_success
   assert_equal "$(call_count PATCH repos/o/r/issues/42)" 0
+}
+
+@test "close: a marker with an artifact field still matches" {
+  export PR_NUMBER=7 PR_MERGED=true
+  stub_issues '[{"number":42,"body":"<!-- renovate-failure pr=7 count=1 artifact=0123456789abcdef0123456789abcdef01234567 -->\nx"}]'
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" close
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+}
+
+@test "close: a done issue is left alone" {
+  export PR_NUMBER=7 PR_MERGED=true
+  stub_issues '[{"number":42,"body":"<!-- renovate-failure pr=7 count=0 artifact=0123456789abcdef0123456789abcdef01234567 done=1 -->\nx"}]'
+  run "${SCRIPT}" close
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "open: a stuck issue (count 0) becomes a failure issue with count 1" {
+  stub_pr open
+  stub_jobs '11:checks:failure'
+  stub_labels_exist
+  stub_existing_issue 7 0
+  run "${SCRIPT}" open
+  assert_success
+  assert_equal "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/42)")" '<!-- renovate-failure pr=7 count=1 -->'
+  request_json PATCH repos/o/r/issues/42 | jq --exit-status '.title | startswith("Renovate PR #7 failed CI: ")'
 }
 
 @test "usage: unknown subcommand exits 2" {

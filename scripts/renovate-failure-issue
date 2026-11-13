@@ -218,7 +218,10 @@ function ensure_label() {
 }
 
 # @description Print the open failure issue whose marker names the given PR,
-#              the oldest one if there are several, or nothing.
+#              the oldest one if there are several, or nothing. The marker may
+#              carry the optional fields ` artifact=<sha>` and then ` done=1`
+#              after the count; an issue marked `done=1` is finished and
+#              counts as absent.
 # @arg $1 pr the PR number
 # @stdout compact JSON `{number, count, body}`, or nothing
 function find_issue() {
@@ -227,8 +230,8 @@ function find_issue() {
     | jq --slurp --compact-output --arg pr "${pr}" '
       [ add // [] | .[] | select(.pull_request == null)
         | ((.body // "") | (split("\n")[0] // "") | sub("\r$"; "")
-           | capture("^<!-- renovate-failure pr=(?<pr>[0-9]+) count=(?<count>[0-9]+) -->$")) as $m
-        | select($m.pr == $pr)
+           | capture("^<!-- renovate-failure pr=(?<pr>[0-9]+) count=(?<count>[0-9]+)(?: artifact=(?<artifact>[0-9a-f]{40}))?(?<done> done=1)? -->$")) as $m
+        | select($m.pr == $pr and $m.done == null)
         | {number, count: ($m.count | tonumber), body}
       ] | min_by(.number) // empty'
 }
