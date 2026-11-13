@@ -1,6 +1,7 @@
 # Copy to .github/workflows/renovate-failure-issue.yml in a repository that
 # uses the shared Renovate preset. It files an issue when CI fails on a
-# Renovate PR and closes that issue when the PR closes.
+# Renovate PR, files one every Monday for each Renovate PR still stuck open
+# after the weekend update window, and closes each issue when its PR closes.
 #
 # `workflows: [ci]` must name the repository's own CI workflow.
 #
@@ -21,6 +22,13 @@ on:
   # the job requires the head to be in this repository.
   pull_request_target:  # zizmor: ignore[dangerous-triggers]
     types: [closed]
+  # Monday 14:17 UTC (9:17am EST, 10:17am EDT), the morning after the window
+  # closes on Sunday 6pm. Off the hour, because GitHub delays scheduled runs
+  # most at the top of the hour. Change it freely.
+  schedule:
+    - cron: '17 14 * * 1'
+  # Runs the sweep by hand.
+  workflow_dispatch:
 permissions: {}
 jobs:
   open:
@@ -76,3 +84,22 @@ jobs:
       mode: close
       pr-number: ${{ format('{0}', github.event.pull_request.number) }}
       pr-merged: ${{ format('{0}', github.event.pull_request.merged) }}
+
+  sweep:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      issues: write  # create, update or close stuck issues; create their labels
+      pull-requests: read  # list open PRs and read their mergeable state
+      checks: read  # read the check runs on each PR's head commit
+      statuses: read  # read the commit statuses on each PR's head commit
+    # A sweep covers every PR, so it cannot share the per-branch group of the
+    # open job; its own group keeps two sweeps from overlapping. It looks up a
+    # PR's issue right before writing it, which narrows a race with an open run
+    # for the same PR to seconds.
+    concurrency:
+      group: renovate-failure-issue-sweep
+      cancel-in-progress: false
+    # yamllint disable-line rule:line-length
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
+    with:
+      mode: sweep

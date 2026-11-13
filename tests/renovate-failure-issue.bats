@@ -33,7 +33,9 @@ function setup() {
   export RUN_URL='https://github.com/o/r/actions/runs/1001'
   export HEAD_BRANCH='renovate/foo-1.x'
   export RUN_CONCLUSION='failure'
-  unset LOG_TAIL_LINES PR_NUMBER PR_MERGED
+  unset LOG_TAIL_LINES PR_NUMBER PR_MERGED SWEEP_MIN_AGE_HOURS SWEEP_MERGEABLE_TRIES SWEEP_RETRY_DELAY
+  # The mergeable-state retries would otherwise sleep between tries.
+  export SWEEP_RETRY_DELAY=0
 }
 
 # @description Write one canned stub response.
@@ -189,12 +191,88 @@ function assert_no_issue_writes() {
   fi
 }
 
-# @description Fail if calls.log records any call to a comments path.
+# @description Fail if calls.log records any comment being posted. Reading
+#              comments is allowed.
 function assert_no_comment_calls() {
   if [[ -f "${GH_STUB_DIR}/calls.log" ]]; then
-    run grep '^CALL .*comments' "${GH_STUB_DIR}/calls.log"
+    run grep '^CALL POST .*comments' "${GH_STUB_DIR}/calls.log"
     assert_failure
   fi
+}
+
+# The head commit of every sweep fixture PR.
+readonly HEAD_SHA='0123456789abcdef0123456789abcdef01234567'
+
+# @description Print a UTC timestamp the given number of hours ago.
+# @arg $1 hours how many hours back
+# @stdout the ISO 8601 timestamp
+function iso_hours_ago() {
+  date --utc --date="-$1 hours" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+# @description Print one open PR as the pulls list returns it: a stuck
+#              Renovate PR unless the overrides say otherwise.
+# @arg $1 number the PR number
+# @arg $2 overrides optional jq filter applied to the PR, e.g. `.draft = true`
+# @stdout the PR as compact JSON
+function sweep_pr() {
+  local -r number="$1" overrides="${2:-.}"
+  jq --null-input --compact-output --argjson number "${number}" \
+    --arg body "$(renovate_pr_body)" --arg created "$(iso_hours_ago 13)" --arg sha "${HEAD_SHA}" \
+    "{number: \$number, state: \"open\", draft: false, title: \"chore(deps): update foo to v1.1.0\",
+      html_url: \"https://github.com/o/r/pull/\\(\$number)\", body: \$body, created_at: \$created,
+      auto_merge: {merge_method: \"squash\"}, user: {login: \"renovate[bot]\"},
+      head: {ref: \"renovate/foo-1.x\", sha: \$sha, repo: {full_name: \"o/r\"}}} | ${overrides}"
+}
+
+# @description Stub the open-PR listing.
+# @arg $1 prs JSON array of PRs
+function stub_open_prs() {
+  stub_response GET 'repos/o/r/pulls' "$1"
+}
+
+# @description Stub the per-PR lookups a sweep makes for one PR: the single-PR
+#              GET (clean mergeable state), the head's combined status and
+#              check runs (passing), and no comments.
+# @arg $1 number the PR number
+function stub_sweep_details() {
+  local -r number="$1"
+  stub_response GET "repos/o/r/pulls/${number}" \
+    "$(jq --null-input --argjson n "${number}" '{number: $n, state: "open", mergeable_state: "clean"}')"
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/status" '{"state":"success","total_count":1}'
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/check-runs" \
+    '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
+  stub_response GET "repos/o/r/issues/${number}/comments" '[]'
+}
+
+# @description Stub a sweep over one PR #7 built by sweep_pr with the given
+#              overrides, existing labels, no existing issue and a successful
+#              issue create.
+# @arg $1 overrides optional jq filter for the PR
+function stub_sweep() {
+  stub_open_prs "[$(sweep_pr 7 "${1:-.}")]"
+  stub_sweep_details 7
+  stub_labels_exist
+  stub_issues '[]'
+  stub_response POST 'repos/o/r/issues' '{"number":42}'
+}
+
+# @description Print an open issue as the issues list returns it, with a
+#              marker line naming a PR.
+# @arg $1 number the issue number
+# @arg $2 marker_fields the marker fields after `renovate-failure`, e.g.
+#         `pr=7 count=0`
+# @stdout the issue as compact JSON
+function marker_issue() {
+  jq --null-input --compact-output --argjson n "$1" --arg fields "$2" \
+    '{number: $n, body: "<!-- renovate-failure \($fields) -->\nold body"}'
+}
+
+# @description Stub the single-PR GET for a closed PR #7.
+# @arg $1 merged_at the merge timestamp, or empty for closed unmerged
+function stub_closed_pr7() {
+  stub_response GET 'repos/o/r/pulls/7' "$(jq --null-input --arg m "$1" \
+    '{number: 7, state: "closed", merged_at: (if $m == "" then null else $m end)}')"
 }
 
 @test "open: PR already closed with no failure issue creates no issue" {
@@ -566,6 +644,352 @@ function assert_no_comment_calls() {
   stub_existing_issue 77 1
   run "${SCRIPT}" close
   assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 0
+}
+
+@test "close: a marker with an artifact field still matches" {
+  export PR_NUMBER=7 PR_MERGED=true
+  stub_issues '[{"number":42,"body":"<!-- renovate-failure pr=7 count=1 artifact=0123456789abcdef0123456789abcdef01234567 -->\nx"}]'
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" close
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+}
+
+@test "close: a done issue is left alone" {
+  export PR_NUMBER=7 PR_MERGED=true
+  stub_issues '[{"number":42,"body":"<!-- renovate-failure pr=7 count=0 artifact=0123456789abcdef0123456789abcdef01234567 done=1 -->\nx"}]'
+  run "${SCRIPT}" close
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "open: a stuck issue (count 0) becomes a failure issue with count 1" {
+  stub_pr open
+  stub_jobs '11:checks:failure'
+  stub_labels_exist
+  stub_existing_issue 7 0
+  run "${SCRIPT}" open
+  assert_success
+  assert_equal "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/42)")" '<!-- renovate-failure pr=7 count=1 -->'
+  request_json PATCH repos/o/r/issues/42 | jq --exit-status '.title | startswith("Renovate PR #7 failed CI: ")'
+}
+
+@test "sweep: no open PRs and no issues writes nothing" {
+  stub_open_prs '[]'
+  stub_issues '[]'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a stuck PR gets a labeled issue with count 0" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+  request_json POST repos/o/r/issues \
+    | jq --exit-status '.labels == ["dependencies","renovate-failure"]
+      and .title == "Renovate PR #7 is stuck: chore(deps): update foo to v1.1.0"'
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  assert_equal "$(head --lines=1 <<< "${body}")" '<!-- renovate-failure pr=7 count=0 -->'
+  assert_regex "${body}" 'https://github\.com/o/r/pull/7'
+  assert_regex "${body}" '\| \[foo\]\(https://example\.com/foo\) \| dependencies \| minor \|'
+  [[ "${body}" != *RELEASE_NOTES_MARKER* ]] || fail 'release notes leaked past the --- rule'
+  assert_regex "${body}" '## How to unstick it'
+}
+
+@test "sweep: a repeat sweep edits the stuck issue silently" {
+  stub_sweep
+  stub_existing_issue 7 0
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
+  assert_no_comment_calls
+  assert_equal "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/42)")" '<!-- renovate-failure pr=7 count=0 -->'
+}
+
+@test "sweep: a PR with a failure issue is skipped" {
+  stub_sweep
+  stub_existing_issue 7 2
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a PR with auto-merge off is not stuck" {
+  stub_sweep '.auto_merge = null'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a draft PR is not stuck" {
+  stub_sweep '.draft = true'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a PR younger than the minimum age is not stuck" {
+  stub_sweep ".created_at = \"$(iso_hours_ago 1)\""
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: SWEEP_MIN_AGE_HOURS sets the minimum age" {
+  export SWEEP_MIN_AGE_HOURS=2
+  stub_sweep ".created_at = \"$(iso_hours_ago 3)\""
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+}
+
+@test "sweep: a non-renovate branch is not stuck" {
+  stub_sweep '.head.ref = "feature/x"'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a fork PR is not stuck" {
+  stub_sweep '.head.repo.full_name = "evil/r"'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a PR whose head repo is gone is skipped" {
+  stub_sweep '.head.repo = null'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: listings are paginated" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  run grep --after-context=1 --extended-regexp '^CALL GET repos/o/r/(pulls|issues)\?' "${GH_STUB_DIR}/calls.log"
+  assert_line --regexp '^ARGV:.* --paginate .*repos/o/r/pulls\?'
+  assert_line --regexp '^ARGV:.* --paginate .*repos/o/r/issues\?'
+}
+
+@test "sweep: a long PR title is truncated to 256 characters" {
+  stub_sweep '.title = ("x" * 300)'
+  run "${SCRIPT}" sweep
+  assert_success
+  request_json POST repos/o/r/issues | jq --exit-status '(.title | length) == 256 and (.title | endswith("…"))'
+}
+
+@test "sweep: never posts a comment" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_comment_calls
+}
+
+@test "usage: an invalid SWEEP_MIN_AGE_HOURS exits 2" {
+  export SWEEP_MIN_AGE_HOURS=abc
+  run "${SCRIPT}" sweep
+  assert_failure 2
+}
+
+@test "sweep: body reports passing CI" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  assert_regex "${body}" '## Current state'
+  [[ "${body}" == *'**CI on the head commit:** passing'* ]] || fail "${body}"
+  [[ "${body}" == *'**Auto-merge:** enabled'* ]] || fail "${body}"
+}
+
+@test "sweep: body reports failing CI from a check run" {
+  stub_sweep
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/check-runs" \
+    '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"timed_out"}]}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**CI on the head commit:** failing'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: body reports failing CI from a commit status" {
+  stub_sweep
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/status" '{"state":"error","total_count":1}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**CI on the head commit:** failing'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: body reports pending CI" {
+  stub_sweep
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/check-runs" \
+    '{"total_count":1,"check_runs":[{"status":"in_progress","conclusion":null}]}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**CI on the head commit:** pending'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: body reports no CI" {
+  stub_sweep
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/status" '{"state":"pending","total_count":0}'
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/check-runs" '{"total_count":0,"check_runs":[]}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**CI on the head commit:** none'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: body reports the mergeable state" {
+  stub_sweep
+  stub_response GET 'repos/o/r/pulls/7' '{"number":7,"state":"open","mergeable_state":"behind"}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**Mergeable state:** `behind`'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: a mergeable state that stays unknown is reported as unknown" {
+  stub_sweep
+  stub_response GET 'repos/o/r/pulls/7' '{"number":7,"state":"open","mergeable_state":null}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+  assert_equal "$(call_count GET repos/o/r/pulls/7)" 3
+  [[ "$(request_body POST repos/o/r/issues)" == *'**Mergeable state:** `unknown`'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: a Renovate artifact comment is reported" {
+  stub_sweep
+  stub_response GET 'repos/o/r/issues/7/comments' \
+    "$(jq --null-input '[{user: {login: "renovate[bot]"}, body: "### ⚠️ Artifact update problem\n\nRenovate failed to update an artifact"}]')"
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**Artifact update problem reported by Renovate:** yes'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: a look-alike artifact comment from another user is ignored" {
+  stub_sweep
+  stub_response GET 'repos/o/r/issues/7/comments' \
+    "$(jq --null-input '[{user: {login: "mallory"}, body: "### ⚠️ Artifact update problem\n\nfake"}]')"
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**Artifact update problem reported by Renovate:** no'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: comments are read with pagination" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  run grep --after-context=1 '^CALL GET repos/o/r/issues/7/comments' "${GH_STUB_DIR}/calls.log"
+  assert_line --regexp '^ARGV:.* --paginate '
+}
+
+@test "sweep: an issue whose PR merged is closed as completed" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 'pr=7 count=2')]"
+  stub_closed_pr7 '2026-11-09T12:00:00Z'
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" sweep
+  assert_success
+  request_json PATCH repos/o/r/issues/42 \
+    | jq --exit-status '.state == "closed" and .state_reason == "completed"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/42)" '\*\*Outcome:\*\* merged'
+  assert_no_comment_calls
+}
+
+@test "sweep: an issue whose PR closed unmerged is closed as not_planned" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 'pr=7 count=0')]"
+  stub_closed_pr7 ''
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" sweep
+  assert_success
+  request_json PATCH repos/o/r/issues/42 \
+    | jq --exit-status '.state == "closed" and .state_reason == "not_planned"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/42)" '\*\*Outcome:\*\* closed without merging'
+}
+
+@test "sweep: a stuck issue whose PR lost auto-merge is closed as not_planned" {
+  stub_sweep '.auto_merge = null'
+  stub_issues "[$(marker_issue 42 'pr=7 count=0')]"
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  request_json PATCH repos/o/r/issues/42 \
+    | jq --exit-status '.state == "closed" and .state_reason == "not_planned"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/42)" '\*\*Outcome:\*\* no longer stuck'
+}
+
+@test "sweep: a failure issue on a non-stuck open PR is untouched" {
+  stub_sweep '.auto_merge = null'
+  stub_issues "[$(marker_issue 42 'pr=7 count=1')]"
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: every duplicate issue for a closed PR is closed" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 'pr=7 count=0'), $(marker_issue 43 'pr=7 count=0')]"
+  stub_closed_pr7 ''
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  stub_response PATCH 'repos/o/r/issues/43' '{"number":43}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  assert_equal "$(call_count PATCH repos/o/r/issues/43)" 1
+}
+
+@test "sweep: a duplicate pair on a stuck PR updates only the oldest" {
+  stub_sweep
+  stub_issues "[$(marker_issue 43 'pr=7 count=0'), $(marker_issue 42 'pr=7 count=0')]"
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  stub_response PATCH 'repos/o/r/issues/43' '{"number":43}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  assert_equal "$(call_count PATCH repos/o/r/issues/43)" 0
+}
+
+@test "sweep: a done issue is never touched" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 "pr=7 count=0 artifact=${HEAD_SHA} done=1")]"
+  stub_closed_pr7 '2026-11-09T12:00:00Z'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "sweep: a failing comments lookup is an API error" {
+  stub_sweep
+  stub_response GET 'repos/o/r/issues/7/comments' '{"message":"Server Error"}' 500
+  run "${SCRIPT}" sweep
+  assert_failure 1
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
+}
+
+@test "sweep: an issue whose PR cannot be found does not stop the backstop" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 41 'pr=999 count=0'), $(marker_issue 42 'pr=7 count=1')]"
+  stub_closed_pr7 '2026-11-09T12:00:00Z'
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  assert_equal "$(call_count PATCH repos/o/r/issues/41)" 0
+}
+
+@test "sweep: a PR lookup failing other than 404 is an API error" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 'pr=7 count=1')]"
+  stub_response GET 'repos/o/r/pulls/7' '{"message":"Server Error"}' 500
+  run "${SCRIPT}" sweep
+  assert_failure 1
   assert_equal "$(call_count PATCH repos/o/r/issues/42)" 0
 }
 
