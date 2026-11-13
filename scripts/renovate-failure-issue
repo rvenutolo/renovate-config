@@ -44,6 +44,11 @@
 #      RUN_CONCLUSION is one of `failure`, `timed_out`, `startup_failure`
 # @env SWEEP_MIN_AGE_HOURS optional, for `sweep`: how many hours a PR must
 #      have been open to count as stuck; default 12
+# @env SWEEP_MERGEABLE_TRIES optional, for `sweep`: how many times to read a
+#      PR's mergeable state while GitHub still reports it as unknown;
+#      default 3
+# @env SWEEP_RETRY_DELAY optional, for `sweep`: seconds between those reads;
+#      default 2
 # @env PR_NUMBER, PR_MERGED the closed PR, for `close`; PR_MERGED is `true` or
 #      `false`
 # @env LOG_TAIL_LINES optional, how many trailing lines of each failed job's
@@ -447,8 +452,70 @@ function open_cmd() {
   fi
 }
 
+# @description Print the CI state of a commit: `failing` if any check run or
+#              commit status failed, else `pending` if any is still running,
+#              else `none` if there are none, else `passing`.
+# @arg $1 sha the commit SHA
+# @stdout the state
+function head_ci_state() {
+  local -r sha="$1"
+  gh_api "repos/${GITHUB_REPOSITORY}/commits/${sha}/status" > "${WORK_DIR}/status.json"
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?per_page=100" \
+    | jq --slurp --compact-output '[.[].check_runs[]]' > "${WORK_DIR}/check-runs.json"
+  jq --raw-output --null-input --slurpfile status "${WORK_DIR}/status.json" \
+    --slurpfile runs "${WORK_DIR}/check-runs.json" '
+    $status[0] as $s | $runs[0] as $r
+    | if ($r | any(.conclusion as $c
+            | ["failure", "timed_out", "cancelled", "action_required", "startup_failure"]
+            | index($c)))
+         or ($s.state == "failure" or $s.state == "error") then "failing"
+      elif ($r | any(.status != "completed"))
+         or ($s.state == "pending" and $s.total_count > 0) then "pending"
+      elif ($r | length) == 0 and $s.total_count == 0 then "none"
+      else "passing" end'
+}
+
+# @description Print a PR's mergeable state. GitHub computes it lazily and
+#              reports null or `unknown` until it has, so it is read up to
+#              SWEEP_MERGEABLE_TRIES times.
+# @arg $1 number the PR number
+# @stdout the state, or `unknown` if it never settled
+function pr_mergeable_state() {
+  local -r number="$1"
+  local state='unknown'
+  local -i try
+  for ((try = 1; try <= SWEEP_MERGEABLE_TRIES; try++)); do
+    state="$(gh_api "repos/${GITHUB_REPOSITORY}/pulls/${number}" \
+      | jq --raw-output '.mergeable_state // "unknown"')"
+    if [[ "${state}" != 'unknown' ]]; then
+      break
+    fi
+    if ((try < SWEEP_MERGEABLE_TRIES)); then
+      sleep "${SWEEP_RETRY_DELAY}"
+    fi
+  done
+  printf '%s\n' "${state}"
+}
+
+# @description Succeed if the PR's author, Renovate, posted its artifact
+#              update problem comment on the PR. A comment by anyone else
+#              with the same heading does not count.
+# @arg $1 number the PR number
+# @arg $2 author the PR author's login
+# @exitcode 0 the comment is there
+# @exitcode 1 it is not
+function has_artifact_comment() {
+  local -r number="$1" author="$2"
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues/${number}/comments?per_page=100" \
+    | jq --slurp --exit-status --arg author "${author}" '
+      [add // [] | .[] | select(.user.login == $author
+        and ((.body // "") | startswith("### ⚠️ Artifact update problem\n\n")))]
+      | length > 0' > /dev/null
+}
+
 # @description Render a stuck issue's body.
-# @stdin JSON `{pr: {number, html_url}, updates}`
+# @stdin JSON `{pr: {number, html_url, created_at}, updates, swept_at, ci,
+#        mergeable_state, artifact_problem}`
 # @stdout the body
 function render_stuck_body() {
   jq --raw-output --arg how_to_unstick "${HOW_TO_UNSTICK}" '
@@ -460,6 +527,15 @@ function render_stuck_body() {
       "## Updates in this PR",
       "",
       (if .updates == "" then "_The PR body does not list its updates; see the PR._" else .updates end),
+      "",
+      "## Current state",
+      "",
+      "- **Open since:** \(.pr.created_at)",
+      "- **Swept at:** \(.swept_at)",
+      "- **CI on the head commit:** \(.ci)",
+      "- **Mergeable state:** `\(.mergeable_state)`",
+      "- **Auto-merge:** enabled",
+      "- **Artifact update problem reported by Renovate:** \(if .artifact_problem then "yes" else "no" end)",
       "",
       "## How to unstick it",
       "",
@@ -474,9 +550,21 @@ function write_stuck_issue() {
   local -r pr_file="$1"
   local pr_number
   pr_number="$(jq --raw-output '.number' "${pr_file}")"
+  local sha author ci mergeable artifact_problem=false swept_at
+  sha="$(jq --raw-output '.head.sha' "${pr_file}")"
+  author="$(jq --raw-output '.user.login' "${pr_file}")"
+  ci="$(head_ci_state "${sha}")"
+  mergeable="$(pr_mergeable_state "${pr_number}")"
+  if has_artifact_comment "${pr_number}" "${author}"; then
+    artifact_problem=true
+  fi
+  swept_at="$(date --utc '+%Y-%m-%dT%H:%M:%SZ')"
   pr_updates_table < "${pr_file}" > "${WORK_DIR}/updates.md"
-  jq --compact-output --rawfile updates "${WORK_DIR}/updates.md" '
-    {pr: {number, html_url}, updates: ($updates | sub("\n$"; ""))}' "${pr_file}" \
+  jq --compact-output --rawfile updates "${WORK_DIR}/updates.md" --arg swept_at "${swept_at}" \
+    --arg ci "${ci}" --arg mergeable "${mergeable}" --argjson artifact_problem "${artifact_problem}" '
+    {pr: {number, html_url, created_at}, updates: ($updates | sub("\n$"; "")),
+     swept_at: $swept_at, ci: $ci, mergeable_state: $mergeable,
+     artifact_problem: $artifact_problem}' "${pr_file}" \
     | render_stuck_body > "${WORK_DIR}/body.md"
 
   # Looked up last, right before the write, to narrow the race with an open
@@ -512,6 +600,10 @@ function sweep_cmd() {
   require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
   SWEEP_MIN_AGE_HOURS="${SWEEP_MIN_AGE_HOURS:-12}"
   require_format SWEEP_MIN_AGE_HOURS '^[0-9]+$' 'a whole number of hours'
+  SWEEP_MERGEABLE_TRIES="${SWEEP_MERGEABLE_TRIES:-3}"
+  require_format SWEEP_MERGEABLE_TRIES '^[1-9][0-9]*$' 'a positive number'
+  SWEEP_RETRY_DELAY="${SWEEP_RETRY_DELAY:-2}"
+  require_format SWEEP_RETRY_DELAY '^[0-9]+$' 'a whole number of seconds'
 
   local -i cutoff
   cutoff=$(($(date --utc '+%s') - SWEEP_MIN_AGE_HOURS * 3600))

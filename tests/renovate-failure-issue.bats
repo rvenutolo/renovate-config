@@ -34,6 +34,8 @@ function setup() {
   export HEAD_BRANCH='renovate/foo-1.x'
   export RUN_CONCLUSION='failure'
   unset LOG_TAIL_LINES PR_NUMBER PR_MERGED SWEEP_MIN_AGE_HOURS SWEEP_MERGEABLE_TRIES SWEEP_RETRY_DELAY
+  # The mergeable-state retries would otherwise sleep between tries.
+  export SWEEP_RETRY_DELAY=0
 }
 
 # @description Write one canned stub response.
@@ -776,6 +778,96 @@ function stub_sweep() {
   export SWEEP_MIN_AGE_HOURS=abc
   run "${SCRIPT}" sweep
   assert_failure 2
+}
+
+@test "sweep: body reports passing CI" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  assert_regex "${body}" '## Current state'
+  [[ "${body}" == *'**CI on the head commit:** passing'* ]] || fail "${body}"
+  [[ "${body}" == *'**Auto-merge:** enabled'* ]] || fail "${body}"
+}
+
+@test "sweep: body reports failing CI from a check run" {
+  stub_sweep
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/check-runs" \
+    '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"timed_out"}]}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**CI on the head commit:** failing'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: body reports failing CI from a commit status" {
+  stub_sweep
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/status" '{"state":"error","total_count":1}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**CI on the head commit:** failing'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: body reports pending CI" {
+  stub_sweep
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/check-runs" \
+    '{"total_count":1,"check_runs":[{"status":"in_progress","conclusion":null}]}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**CI on the head commit:** pending'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: body reports no CI" {
+  stub_sweep
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/status" '{"state":"pending","total_count":0}'
+  stub_response GET "repos/o/r/commits/${HEAD_SHA}/check-runs" '{"total_count":0,"check_runs":[]}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**CI on the head commit:** none'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: body reports the mergeable state" {
+  stub_sweep
+  stub_response GET 'repos/o/r/pulls/7' '{"number":7,"state":"open","mergeable_state":"behind"}'
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**Mergeable state:** `behind`'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: a mergeable state that stays unknown is reported as unknown" {
+  stub_sweep
+  stub_response GET 'repos/o/r/pulls/7' '{"number":7,"state":"open","mergeable_state":null}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+  assert_equal "$(call_count GET repos/o/r/pulls/7)" 3
+  [[ "$(request_body POST repos/o/r/issues)" == *'**Mergeable state:** `unknown`'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: a Renovate artifact comment is reported" {
+  stub_sweep
+  stub_response GET 'repos/o/r/issues/7/comments' \
+    "$(jq --null-input '[{user: {login: "renovate[bot]"}, body: "### ⚠️ Artifact update problem\n\nRenovate failed to update an artifact"}]')"
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**Artifact update problem reported by Renovate:** yes'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: a look-alike artifact comment from another user is ignored" {
+  stub_sweep
+  stub_response GET 'repos/o/r/issues/7/comments' \
+    "$(jq --null-input '[{user: {login: "mallory"}, body: "### ⚠️ Artifact update problem\n\nfake"}]')"
+  run "${SCRIPT}" sweep
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" == *'**Artifact update problem reported by Renovate:** no'* ]] || fail 'expected line missing from the issue body'
+}
+
+@test "sweep: comments are read with pagination" {
+  stub_sweep
+  run "${SCRIPT}" sweep
+  assert_success
+  run grep --after-context=1 '^CALL GET repos/o/r/issues/7/comments' "${GH_STUB_DIR}/calls.log"
+  assert_line --regexp '^ARGV:.* --paginate '
 }
 
 @test "usage: unknown subcommand exits 2" {
