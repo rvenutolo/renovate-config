@@ -965,6 +965,34 @@ function stub_closed_pr7() {
   assert_no_issue_writes
 }
 
+@test "sweep: a failing comments lookup is an API error" {
+  stub_sweep
+  stub_response GET 'repos/o/r/issues/7/comments' '{"message":"Server Error"}' 500
+  run "${SCRIPT}" sweep
+  assert_failure 1
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
+}
+
+@test "sweep: an issue whose PR cannot be found does not stop the backstop" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 41 'pr=999 count=0'), $(marker_issue 42 'pr=7 count=1')]"
+  stub_closed_pr7 '2026-11-09T12:00:00Z'
+  stub_response PATCH 'repos/o/r/issues/42' '{"number":42}'
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 1
+  assert_equal "$(call_count PATCH repos/o/r/issues/41)" 0
+}
+
+@test "sweep: a PR lookup failing other than 404 is an API error" {
+  stub_open_prs '[]'
+  stub_issues "[$(marker_issue 42 'pr=7 count=1')]"
+  stub_response GET 'repos/o/r/pulls/7' '{"message":"Server Error"}' 500
+  run "${SCRIPT}" sweep
+  assert_failure 1
+  assert_equal "$(call_count PATCH repos/o/r/issues/42)" 0
+}
+
 @test "usage: unknown subcommand exits 2" {
   run "${SCRIPT}" reopen
   assert_failure 2

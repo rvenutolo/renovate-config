@@ -497,20 +497,21 @@ function pr_mergeable_state() {
   printf '%s\n' "${state}"
 }
 
-# @description Succeed if the PR's author, Renovate, posted its artifact
+# @description Print whether the PR's author, Renovate, posted its artifact
 #              update problem comment on the PR. A comment by anyone else
 #              with the same heading does not count.
 # @arg $1 number the PR number
 # @arg $2 author the PR author's login
-# @exitcode 0 the comment is there
-# @exitcode 1 it is not
-function has_artifact_comment() {
+# @stdout `true` or `false`
+# @exitcode 1 the comments could not be read
+function artifact_problem_reported() {
   local -r number="$1" author="$2"
   gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues/${number}/comments?per_page=100" \
-    | jq --slurp --exit-status --arg author "${author}" '
+    > "${WORK_DIR}/comments.json"
+  jq --slurp --arg author "${author}" '
       [add // [] | .[] | select(.user.login == $author
         and ((.body // "") | startswith("### ⚠️ Artifact update problem\n\n")))]
-      | length > 0' > /dev/null
+      | length > 0' "${WORK_DIR}/comments.json"
 }
 
 # @description Render a stuck issue's body.
@@ -550,14 +551,12 @@ function write_stuck_issue() {
   local -r pr_file="$1"
   local pr_number
   pr_number="$(jq --raw-output '.number' "${pr_file}")"
-  local sha author ci mergeable artifact_problem=false swept_at
+  local sha author ci mergeable artifact_problem swept_at
   sha="$(jq --raw-output '.head.sha' "${pr_file}")"
   author="$(jq --raw-output '.user.login' "${pr_file}")"
   ci="$(head_ci_state "${sha}")"
   mergeable="$(pr_mergeable_state "${pr_number}")"
-  if has_artifact_comment "${pr_number}" "${author}"; then
-    artifact_problem=true
-  fi
+  artifact_problem="$(artifact_problem_reported "${pr_number}" "${author}")"
   swept_at="$(date --utc '+%Y-%m-%dT%H:%M:%SZ')"
   pr_updates_table < "${pr_file}" > "${WORK_DIR}/updates.md"
   jq --compact-output --rawfile updates "${WORK_DIR}/updates.md" --arg swept_at "${swept_at}" \
@@ -644,7 +643,19 @@ function sweep_cmd() {
       finish_issue "${issue}" "${pr}" 'no longer stuck: auto-merge is off or the PR is a draft' 'not_planned'
       continue
     fi
-    gh_api "repos/${GITHUB_REPOSITORY}/pulls/${pr}" > "${WORK_DIR}/closed-pr.json"
+    # A PR that cannot be found would otherwise fail every later sweep and
+    # keep the issues after it from closing; stderr is captured to tell a 404
+    # from other failures.
+    local err
+    # shellcheck disable=SC2069
+    if ! err="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}" 2>&1 > "${WORK_DIR}/closed-pr.json")"; then
+      if [[ "${err}" == *'(HTTP 404)'* ]]; then
+        log "PR #${pr} not found; leaving its issue"
+        continue
+      fi
+      printf '%s\n' "${err}" >&2
+      api_error "looking up PR #${pr} failed"
+    fi
     case "$(jq --raw-output 'if .state == "open" then "open" elif .merged_at != null then "merged" else "closed" end' \
       "${WORK_DIR}/closed-pr.json")" in
       merged) finish_issue "${issue}" "${pr}" 'merged' 'completed' ;;
