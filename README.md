@@ -200,6 +200,9 @@ For each consuming repository:
 - **Branch protection** requiring branches to be up to date before merging, and
   **auto-merge** enabled on the repository. The preset assumes both.
 - **Dependabot alerts** turned on, which security-fix PRs depend on.
+- **Workflow permissions.** The caller grants each job only what it needs; the
+  `sweep` job adds `checks: read` and `statuses: read` to read each PR's CI
+  state. Nothing needs changing in the repository's settings for these.
 - **Repository activity.** GitHub disables scheduled workflows in a public
   repository after 60 days without activity, which would stop the sweep.
   Renovate's merges normally keep a repository active.

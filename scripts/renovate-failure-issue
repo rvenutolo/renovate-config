@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # @description File, update and close the issue that tracks a Renovate PR whose
-#              CI failed. One issue per PR, labeled `dependencies` and
+#              CI failed or that is stuck open after the update window. One
+#              issue per PR, labeled `dependencies` and
 #              `renovate-failure`, found again through the hidden marker on the
 #              first line of its body:
 #
@@ -31,7 +32,11 @@
 #              auto-merge enabled, and opened at least SWEEP_MIN_AGE_HOURS
 #              ago. A PR that already has a failure issue (`count` 1 or more)
 #              is skipped; a repeat sweep rewrites the stuck issue silently,
-#              and a later CI failure turns it into a failure issue.
+#              and a later CI failure turns it into a failure issue. The sweep
+#              then closes, as `close` would, every issue whose PR has closed,
+#              duplicates included, and closes as `not_planned` every stuck
+#              issue whose PR is open but no longer counts as stuck. An issue
+#              whose PR cannot be found is left open.
 #
 #              Branch names, PR titles and bodies, job names and job logs are
 #              untrusted: they reach jq only through --arg, --rawfile or stdin,
@@ -39,7 +44,7 @@
 #              text or as part of a command line other than the URL-encoded
 #              branch in the PR lookup.
 # @arg $1 subcommand `open`, `close` or `sweep`
-# @env GITHUB_REPOSITORY `owner/repo`, both subcommands
+# @env GITHUB_REPOSITORY `owner/repo`, every subcommand
 # @env RUN_ID, RUN_URL, HEAD_BRANCH, RUN_CONCLUSION the failed run, for `open`;
 #      RUN_CONCLUSION is one of `failure`, `timed_out`, `startup_failure`
 # @env SWEEP_MIN_AGE_HOURS optional, for `sweep`: how many hours a PR must
