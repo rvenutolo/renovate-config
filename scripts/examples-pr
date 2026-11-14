@@ -410,10 +410,10 @@ function ensure_failure_label() {
   api_error "creating label ${FAILURE_LABEL} failed"
 }
 
-# @description Print the number of the oldest open failure issue, opened by the
-#              workflow token (`github-actions[bot]`) so a hand-written issue
-#              with the marker is ignored, whose body
-#              starts with the marker line for a PR, or nothing.
+# @description Print the number of the oldest open failure issue for a PR whose
+#              body starts with its marker line and that the workflow token
+#              (`github-actions[bot]`) opened, so a hand-written issue with the
+#              marker is ignored; print nothing if none.
 # @arg $1 pr the PR number
 # @stdout the issue number, or nothing
 function find_failure_issue() {
