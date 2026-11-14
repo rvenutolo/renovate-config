@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.2.0](https://github.com/rvenutolo/renovate-config/compare/v1.1.0...v1.2.0) (2026-11-14)
+
+
+### Features
+
+* add a problems mode that files the Dashboard's problems as an issue ([3dce8e0](https://github.com/rvenutolo/renovate-config/commit/3dce8e0b2e30aaf216e7fc795fb6d200683569b8))
+* close, update and silence the problems issue by the window ([aef922f](https://github.com/rvenutolo/renovate-config/commit/aef922f6d74a5cb5ace5319656ef14cb9e27b92c))
+* pin the Dependency Dashboard title in the preset ([71ea629](https://github.com/rvenutolo/renovate-config/commit/71ea6295ef617ba63b6f04be2872a62631fff9e6))
+* report Renovate's Dependency Dashboard problems weekly ([#11](https://github.com/rvenutolo/renovate-config/issues/11)) ([6160704](https://github.com/rvenutolo/renovate-config/commit/6160704b381ec9a7cb447c0c61852c746cacb234))
+* run the problems check from the caller every Sunday ([c38e835](https://github.com/rvenutolo/renovate-config/commit/c38e835381d540138914d73ac3f72e2b2528a11d))
+
+
+### Bug Fixes
+
+* run the problems check hours before the window closes ([176cc72](https://github.com/rvenutolo/renovate-config/commit/176cc729932cc56081802cb7e1b4291a70dfae0e))
+* stop job closes of the problems issue from silencing it ([12d5632](https://github.com/rvenutolo/renovate-config/commit/12d5632bc760c5a53e4fcbdda8f4be6e9455d03d))
+* tighten the problems mode's listings, log link and time zone ([24dd277](https://github.com/rvenutolo/renovate-config/commit/24dd277a6d4c3db00a4dd22b6648f27741461226))
+* tighten the problems mode's listings, log link and time zone ([#14](https://github.com/rvenutolo/renovate-config/issues/14)) ([16324ee](https://github.com/rvenutolo/renovate-config/commit/16324ee84c3fcdc2ed32d94a04c7b28c1d222109))
+
 ## [1.1.0](https://github.com/rvenutolo/renovate-config/compare/v1.0.0...v1.1.0) (2026-11-13)
 
 
