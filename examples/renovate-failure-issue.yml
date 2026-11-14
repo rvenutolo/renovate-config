@@ -85,7 +85,9 @@ jobs:
       pr-merged: ${{ format('{0}', github.event.pull_request.merged) }}
 
   sweep:
-    if: (github.event_name == 'schedule' && github.event.schedule == '17 14 * * 1') || github.event_name == 'workflow_dispatch'
+    if: |-
+      (github.event_name == 'schedule' && github.event.schedule == '17 14 * * 1')
+      || github.event_name == 'workflow_dispatch'
     permissions:
       issues: write  # create, update or close stuck issues; create their labels
       pull-requests: read  # list open PRs and read their mergeable state
@@ -104,7 +106,9 @@ jobs:
       mode: sweep
 
   problems:
-    if: (github.event_name == 'schedule' && github.event.schedule == '47 19 * * 0') || github.event_name == 'workflow_dispatch'
+    if: |-
+      (github.event_name == 'schedule' && github.event.schedule == '47 19 * * 0')
+      || github.event_name == 'workflow_dispatch'
     permissions:
       issues: write  # read the Dependency Dashboard; create, update or close the problems issue; create its labels
     # Its own group, so two checks never overlap. The check needs Renovate's
