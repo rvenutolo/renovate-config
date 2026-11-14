@@ -39,6 +39,10 @@
 - **Conventional commits.** Commit messages and PR titles look like
   `chore(deps): ...`, and PRs carry the `dependencies` label.
 - **Nix.** `flake.lock` inputs are updated.
+- **pre-commit.** Hook `rev:` values in `.pre-commit-config.yaml` are updated,
+  including SHA pins with a version comment. Renovate ships this manager
+  disabled, so the preset turns it on; it does nothing in a repo without that
+  file.
 
 The preset extends `config:best-practices` and still sets every behavior above
 explicitly, so an upstream change to that preset cannot silently alter one. The

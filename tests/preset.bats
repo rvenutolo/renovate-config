@@ -114,6 +114,10 @@ function preset_assert() {
     | $age != null and $own != null and $own > $age'
 }
 
+@test "preset: pre-commit manager enabled" {
+  preset_assert '."pre-commit".enabled == true'
+}
+
 @test "preset: every packageRule has a description" {
   preset_assert 'all(.packageRules[]; (.description | type) == "string" or (.description | type) == "array")'
 }

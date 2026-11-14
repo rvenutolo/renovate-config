@@ -15,6 +15,7 @@
     "semanticCommits enabled with type chore and scope deps: commit messages and PR titles follow the Angular convention, chore(deps): ...",
     "labels dependencies: Renovate PRs carry the dependencies label.",
     "nix enabled: flake.lock inputs are updated.",
+    "pre-commit enabled: hook rev: values in .pre-commit-config.yaml are updated, including SHA pins with a version comment. It does nothing in a repo without that file. Renovate ships this manager disabled while it is in beta, so it is turned on explicitly.",
     "vulnerabilityAlerts: security fixes go out right away, each in its own PR, ignoring the weekly schedule, grouping and release age, and automerge like everything else. schedule [], minimumReleaseAge null and groupName null are the defaults, written out. It relies on Dependabot alerts being enabled for the repo.",
     "packageRules, in order: the non-major batch, the 7-day release age (which does not hold updates that have no release timestamp), the release-age carve-outs, and the exemption for this preset's own releases. Order matters because a later rule wins. Consumers override with a later packageRules entry, not a top-level key."
   ],
@@ -42,6 +43,9 @@
   "semanticCommitScope": "deps",
   "labels": ["dependencies"],
   "nix": {
+    "enabled": true
+  },
+  "pre-commit": {
     "enabled": true
   },
   "vulnerabilityAlerts": {
