@@ -31,11 +31,12 @@ on:
     # the window closes on Sunday 6pm. Change it freely; the sweep job's if:
     # names this exact string.
     - cron: '17 14 * * 1'
-    # The problems check: Sunday 21:47 UTC (4:47pm EST, 5:47pm EDT), before
-    # the window closes at 6pm New York time on either side of DST, so the
-    # Dashboard it reads was written by a Renovate run inside the window.
-    # Keep it inside the window; the problems job's if: names this string.
-    - cron: '47 21 * * 0'
+    # The problems check: Sunday 19:47 UTC (2:47pm EST, 3:47pm EDT), inside the
+    # window on either side of DST, so the Dashboard it reads was written by a
+    # Renovate run inside the window. The window closes at 6pm New York time;
+    # the hours to spare absorb GitHub's delays to scheduled runs. Keep it
+    # inside the window; the problems job's if: names this string.
+    - cron: '47 19 * * 0'
   # Runs the sweep and the problems check by hand.
   workflow_dispatch:
 permissions: {}
@@ -115,7 +116,7 @@ jobs:
       mode: sweep
 
   problems:
-    if: (github.event_name == 'schedule' && github.event.schedule == '47 21 * * 0') || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' && github.event.schedule == '47 19 * * 0') || github.event_name == 'workflow_dispatch'
     permissions:
       issues: write  # read the Dependency Dashboard; create, update or close the problems issue; create its labels
     # Its own group, so two checks never overlap. The check needs Renovate's

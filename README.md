@@ -129,8 +129,8 @@ hand while its PR stays stuck is filed again by the next sweep.
 
 Some Renovate failures leave no PR to attach an issue to. A failed
 `nix flake update`, for example, leaves nothing to commit, so Renovate only
-lists the error on its Dependency Dashboard issue. Every Sunday at 21:47 UTC
-(4:47pm EST, 5:47pm EDT), set by the cron `47 21 * * 0`, the caller's
+lists the error on its Dependency Dashboard issue. Every Sunday at 19:47 UTC
+(2:47pm EST, 3:47pm EDT), set by the cron `47 19 * * 0`, the caller's
 `problems` job reads the Dashboard and files one issue for the whole
 repository, titled `Renovate reports problems in this repository`, with the
 same labels as the other issues.
@@ -145,7 +145,7 @@ Renovate only lists a problem tied to a schedule, such as a lock-file update,
 on runs inside that schedule; outside it the problem drops off the Dashboard.
 So the issue follows the Dashboard only inside the lock-file maintenance
 window, Saturday 6pm to Sunday 6pm New York time, which is why the check runs
-late on Sunday afternoon:
+on Sunday afternoon, hours before the window closes:
 
 - Problems listed: the issue is created, or rewritten without a comment when
   the problems change.

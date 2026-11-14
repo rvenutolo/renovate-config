@@ -91,7 +91,7 @@ function caller_if() {
   yaml_assert "${CALLER}" '.on.workflow_run.workflows == ["ci"]
     and .on.workflow_run.types == ["completed"]
     and .on.pull_request_target.types == ["closed"]
-    and .on.schedule == [{"cron":"17 14 * * 1"},{"cron":"47 21 * * 0"}]
+    and .on.schedule == [{"cron":"17 14 * * 1"},{"cron":"47 19 * * 0"}]
     and (.on | has("workflow_dispatch"))'
 }
 
@@ -113,7 +113,7 @@ function caller_if() {
 
 @test "caller example: sweep and problems each run only on their own cron or manual dispatch" {
   local job cron expr
-  for job in 'sweep:17 14 \* \* 1' 'problems:47 21 \* \* 0'; do
+  for job in 'sweep:17 14 \* \* 1' 'problems:47 19 \* \* 0'; do
     cron="${job#*:}" job="${job%%:*}"
     expr="$(caller_if "${job}")"
     assert_regex "${expr}" "github\.event_name == 'schedule' && github\.event\.schedule == '${cron}'"
