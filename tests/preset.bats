@@ -118,6 +118,10 @@ function preset_assert() {
   preset_assert 'all(.packageRules[]; (.description | type) == "string" or (.description | type) == "array")'
 }
 
+@test "preset: dependency dashboard title is pinned" {
+  preset_assert '.dependencyDashboardTitle == "Dependency Dashboard"'
+}
+
 @test "preset: top-level description explains each setting" {
   preset_assert '(.description | type == "array") and (.description | length >= 10)'
 }
