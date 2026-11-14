@@ -33,7 +33,8 @@ function setup() {
   export RUN_URL='https://github.com/o/r/actions/runs/1001'
   export HEAD_BRANCH='renovate/foo-1.x'
   export RUN_CONCLUSION='failure'
-  unset LOG_TAIL_LINES PR_NUMBER PR_MERGED SWEEP_MIN_AGE_HOURS SWEEP_MERGEABLE_TRIES SWEEP_RETRY_DELAY
+  unset LOG_TAIL_LINES PR_NUMBER PR_MERGED SWEEP_MIN_AGE_HOURS SWEEP_MERGEABLE_TRIES SWEEP_RETRY_DELAY PROBLEMS_NOW
+  FIXTURES="${REPO_DIR}/tests/fixtures/dashboards"
   # The mergeable-state retries would otherwise sleep between tries.
   export SWEEP_RETRY_DELAY=0
 }
@@ -273,6 +274,36 @@ function marker_issue() {
 function stub_closed_pr7() {
   stub_response GET 'repos/o/r/pulls/7' "$(jq --null-input --arg m "$1" \
     '{number: 7, state: "closed", merged_at: (if $m == "" then null else $m end)}')"
+}
+
+# A Sunday afternoon inside the lock-file maintenance window, New York time.
+readonly IN_WINDOW='2026-11-15T21:47:00Z'
+
+# @description Print the Dependency Dashboard issue #3 as the issues list
+#              returns it.
+# @arg $1 body_file the Dashboard body
+# @arg $2 overrides optional jq filter applied to the issue
+# @stdout the issue as compact JSON
+function dashboard_issue() {
+  jq --null-input --compact-output --rawfile body "$1" \
+    "{number: 3, state: \"open\", title: \"Dependency Dashboard\", user: {login: \"renovate[bot]\"},
+      html_url: \"https://github.com/o/r/issues/3\", body: \$body} | ${2:-.}"
+}
+
+# @description Stub the issues listing with the given issues.
+# @arg $@ issues each issue as compact JSON
+function stub_issue_list() {
+  stub_issues "$(printf '%s\n' "$@" | jq --slurp --compact-output '.')"
+}
+
+# @description Stub a problems run over a Dashboard body: the Dashboard as the
+#              only issue, existing labels and a successful create.
+# @arg $1 body_file the Dashboard body
+# @arg $2 overrides optional jq filter applied to the Dashboard issue
+function stub_problems() {
+  stub_issue_list "$(dashboard_issue "$1" "${2:-.}")"
+  stub_labels_exist
+  stub_response POST 'repos/o/r/issues' '{"number":50}'
 }
 
 @test "open: PR already closed with no failure issue creates no issue" {
@@ -991,6 +1022,132 @@ function stub_closed_pr7() {
   run "${SCRIPT}" sweep
   assert_failure 1
   assert_equal "$(call_count PATCH repos/o/r/issues/42)" 0
+}
+
+@test "problems: hosted Dashboard problems file a labeled issue" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+  request_json POST repos/o/r/issues \
+    | jq --exit-status '.labels == ["dependencies","renovate-failure"]
+      and .title == "Renovate reports problems in this repository"'
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  assert_regex "$(head --lines=1 <<< "${body}")" '^<!-- renovate-problems set=[0-9a-f]{16} -->$'
+  [[ "${body}" == *'⚠️ WARN: Error updating flake.lock'* ]] || fail 'flake.lock problem missing'
+  [[ "${body}" == *'⚠️ WARN: Package lookup failures'* ]] || fail 'lookup problem missing'
+  [[ "${body}" == *'Renovate failed to look up the following dependencies'* ]] || fail 'lookup block missing'
+  [[ "${body}" == *'**Dependency Dashboard:** https://github.com/o/r/issues/3'* ]] || fail 'dashboard link missing'
+  [[ "${body}" == *'**Renovate logs:** https://developer.mend.io/'* ]] || fail 'mend link missing'
+  [[ "${body}" != *'lock file maintenance'* ]] || fail 'an uncounted section leaked in'
+}
+
+@test "problems: main-rendered Dashboard problems are found too" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/main-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  [[ "${body}" == *'⚠️ WARN: Error updating flake.lock'* ]] || fail 'problem line missing'
+  [[ "${body}" == *'⚠️ **Warning**'* ]] || fail 'warning block missing'
+  [[ "${body}" == *'`example-dep`'* ]] || fail 'warning detail missing'
+  [[ "${body}" == *'chore(deps): update foo to v1.1.0'* ]] || fail 'errored branch missing'
+  [[ "${body}" != *'retry-branch'* ]] || fail 'checkbox comment not stripped'
+  [[ "${body}" != *'tried to run on this repository'* ]] || fail 'section header captured'
+  [[ "${body}" != *'encountered an error and will be retried'* ]] || fail 'errored description captured'
+}
+
+@test "problems: a clean Dashboard files nothing" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/clean.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: uncounted sections are ignored" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/uncounted.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: an issue titled Dependency Dashboard by someone else is ignored" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt" '.user.login = "mallory"'
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: a Renovate issue with another title is ignored" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt" '.title = "Other"'
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: Dashboard text cannot break out of the fence or mention anyone" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  printf '%s\n' '## Repository Problems' '' 'header' '' ' - ⚠️ WARN: bad ``` fence @someone' \
+    > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  local body outside
+  body="$(request_body POST repos/o/r/issues)"
+  assert_regex "${body}" $'\n````+text\n'
+  # Drop everything between the opening fence line and its matching close.
+  outside="$(awk '
+    !inside && /^````+text$/ { inside = 1; fence = substr($0, 1, length($0) - 4); next }
+    inside && $0 == fence { inside = 0; next }
+    !inside { print }' <<< "${body}")"
+  [[ "${outside}" != *'@someone'* ]] || fail 'a mention escaped the fenced block'
+}
+
+@test "problems: a Mend link on another host is dropped" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  sed 's#https://developer.mend.io//github/o/r#https://evil.example/x#; s#https://developer.mend.io/github/o/r#https://evil.example/y#' \
+    "${FIXTURES}/hosted-problems.txt" > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" != *'Renovate logs'* ]] || fail 'an off-host log link was kept'
+}
+
+@test "problems: the problem list is truncated to fit the body limit" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  {
+    printf '%s\n' '## Repository Problems' '' 'header' ''
+    printf ' - %s\n' "$(head --bytes=70000 /dev/zero | tr '\0' 'x')"
+  } \
+    > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  ((${#body} < 65536)) || fail "body is ${#body} characters"
+  [[ "${body}" == *"_Problem list truncated to fit GitHub's issue size limit._"* ]] || fail 'truncation note missing'
+}
+
+@test "problems: never posts a comment" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_comment_calls
+}
+
+@test "usage: an invalid PROBLEMS_NOW exits 2" {
+  export PROBLEMS_NOW=yesterday
+  run "${SCRIPT}" problems
+  assert_failure 2
 }
 
 @test "usage: unknown subcommand exits 2" {

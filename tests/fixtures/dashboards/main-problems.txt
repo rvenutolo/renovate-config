@@ -1,0 +1,34 @@
+This issue lists Renovate updates and detected dependencies. Read the [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/) docs to learn more.
+
+## Repository Problems
+
+Renovate tried to run on this repository, but found these problems.
+
+ - ⚠️ WARN: Error updating flake.lock
+
+## Errored
+
+The following updates encountered an error and will be retried. To force a retry now, click on a checkbox below.
+
+ - [ ] <!-- retry-branch=renovate/foo-1.x -->chore(deps): update foo to v1.1.0
+
+---
+
+> ⚠️ **Warning**
+> 
+> Renovate failed to look up the following dependencies: `example-dep`.
+> 
+> Files affected: `package.json`
+
+---
+
+## Awaiting Schedule
+
+The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
+
+ - [ ] <!-- unschedule-branch=renovate/lock-file-maintenance -->chore(deps): lock file maintenance
+
+## Detected Dependencies
+
+<details><summary>nix (1)</summary>
+</details>

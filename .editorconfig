@@ -64,3 +64,8 @@ space_redirects = true
 
 [*.md]
 trim_trailing_whitespace = false
+
+# Renovate Dependency Dashboards captured as-is: Renovate ends its blank quote
+# lines with a space, and the parser under test must cope with that.
+[tests/fixtures/dashboards/**]
+trim_trailing_whitespace = false
