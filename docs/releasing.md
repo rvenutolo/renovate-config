@@ -47,9 +47,10 @@ Renovate does not touch them in this repository; a release does, through a PR.
   comments on the issue already open for that PR. It closes the issue, with a
   note on whether the PR merged, when the PR closes.
 
-Both subcommands act only on PRs from a `chore/examples-` branch of this
+`open` and `refresh` act only on PRs from a `chore/examples-` branch of this
 repository that the release app opened; a PR opened by anyone else, a
-maintainer included, is never touched.
+maintainer included, is never touched. The failure-issue jobs have no author
+check: they match any `chore/examples-` PR from this repository.
 
 ### Known gaps
 

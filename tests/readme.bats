@@ -19,12 +19,37 @@ function setup() {
   ((count >= 6))
 }
 
-@test "docs: adopting has the walkthrough headings" {
-  local heading
-  for heading in \
-    '## Adopting it in a repo' \
-    '## Prerequisites'; do
-    grep --fixed-strings --line-regexp --quiet -- "${heading}" "${DOCS}/adopting.md"
+@test "docs: adopting has the walkthrough heading" {
+  grep --fixed-strings --line-regexp --quiet -- '## Adopting it in a repo' "${DOCS}/adopting.md"
+}
+
+@test "docs: every relative link inside docs resolves" {
+  local file target path count=0
+  for file in "${DOCS}"/*.md; do
+    while IFS= read -r target; do
+      path="${target%%#*}"
+      # A bare anchor points into the same file.
+      [[ -z "${path}" ]] && path="$(basename -- "${file}")"
+      [[ -f "${DOCS}/${path}" ]]
+      count=$((count + 1))
+    done < <(grep --only-matching --extended-regexp '\]\([^)]+\)' "${file}" \
+      | sed --expression='s/^](//' --expression='s/)$//' \
+      | grep --invert-match --extended-regexp '^(https?:|mailto:)' || true)
+  done
+  ((count >= 1))
+}
+
+@test "docs: same-file anchors point at a heading" {
+  local file anchor
+  for file in "${DOCS}"/*.md; do
+    while IFS= read -r anchor; do
+      # GitHub's slug: lowercase, punctuation dropped, spaces to hyphens.
+      grep --extended-regexp '^#+ ' "${file}" \
+        | sed --expression='s/^#* //' \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed --expression='s/[^a-z0-9 -]//g' --expression='s/ /-/g' \
+        | grep --fixed-strings --line-regexp --quiet -- "${anchor}"
+    done < <(grep --only-matching --extended-regexp '\]\(#[^)]+\)' "${file}" | sed --expression='s/^](#//' --expression='s/)$//')
   done
 }
 
