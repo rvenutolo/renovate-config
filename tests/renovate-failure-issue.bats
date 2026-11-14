@@ -1230,6 +1230,7 @@ function first_render() {
   request_json PATCH repos/o/r/issues/40 | jq --exit-status '.state == null'
   request_json PATCH repos/o/r/issues/41 | jq --exit-status '.state == "closed" and .state_reason == "not_planned"'
   assert_regex "$(request_body PATCH repos/o/r/issues/41)" '\*\*Outcome:\*\* duplicate'
+  assert_regex "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/41)")" ' resolved=1 -->$'
 }
 
 @test "problems: cleared problems close the issue as completed and mark it resolved" {
@@ -1333,7 +1334,8 @@ function first_render() {
     '2026-10-31T21:59:00Z out' '2026-10-31T22:00:00Z in' \
     '2026-11-01T22:59:00Z in' '2026-11-01T23:00:00Z out' \
     '2026-11-07T22:59:00Z out' '2026-11-07T23:00:00Z in' \
-    '2026-03-14T22:00:00Z in'; do
+    '2026-03-14T22:00:00Z in' \
+    '2026-10-25T21:59:00Z in' '2026-10-25T22:00:00Z out'; do
     now="${spec% *}" expected="${spec#* }"
     export GH_STUB_DIR="${BATS_TEST_TMPDIR}/window-${now//:/}"
     mkdir --parents "${GH_STUB_DIR}"
@@ -1363,6 +1365,51 @@ function first_render() {
   run "${SCRIPT}" sweep
   assert_success
   assert_no_issue_writes
+}
+
+@test "problems: problems returning after a not-found close file a new issue" {
+  export PROBLEMS_NOW='2026-11-16T14:17:00Z'
+  stub_issue_list "$(problems_issue 40 open $'<!-- renovate-problems set=0123456789abcdef -->\nold')"
+  stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+  run "${SCRIPT}" problems
+  assert_success
+  local closed
+  closed="$(request_body PATCH repos/o/r/issues/40)"
+  assert_regex "$(head --lines=1 <<< "${closed}")" ' resolved=1 -->$'
+}
+
+@test "problems: outside the window a hand-closed issue is never followed by a new one" {
+  export PROBLEMS_NOW='2026-11-16T14:17:00Z'
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" \
+    "$(problems_issue 40 closed $'<!-- renovate-problems set=0000000000000000 -->\nold' '2026-11-15T22:30:00Z')"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: closing a reopened resolved issue keeps a single resolved field" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/clean.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/clean.txt")" \
+    "$(problems_issue 40 open $'<!-- renovate-problems set=0123456789abcdef resolved=1 -->\nold')"
+  stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/40)")" \
+    '<!-- renovate-problems set=0123456789abcdef resolved=1 -->'
+}
+
+@test "problems: markup after a Mend link never reaches the issue" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  sed 's#https://developer.mend.io//github/o/r#https://developer.mend.io/<details><summary>x</summary>#; s#https://developer.mend.io/github/o/r#https://developer.mend.io/<img src=x>#' \
+    "${FIXTURES}/hosted-problems.txt" > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  local logs
+  logs="$(grep --fixed-strings '**Renovate logs:**' <<< "$(request_body POST repos/o/r/issues)" || true)"
+  [[ "${logs}" != *'<'* ]] || fail "markup reached the log link: ${logs}"
 }
 
 @test "usage: unknown subcommand exits 2" {

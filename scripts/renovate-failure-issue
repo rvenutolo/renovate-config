@@ -669,12 +669,14 @@ function problems_fingerprint() {
 }
 
 # @description Print the Mend log link from a Dashboard body, if it has one
-#              on developer.mend.io; a link to any other host is dropped.
+#              on developer.mend.io; a link to any other host is dropped, and
+#              the link stops at the first character outside a plain URL path,
+#              so no markup after it reaches the issue.
 # @stdin the Dashboard body
 # @stdout the URL, or nothing
 function mend_log_url() {
   jq --raw-input --slurp --raw-output '
-    [match("https://developer\\.mend\\.io/[^ )\\s]*"; "g").string][0] // empty'
+    [match("https://developer\\.mend\\.io/[A-Za-z0-9/_.~%-]*"; "g").string][0] // empty'
 }
 
 # @description Render the problems issue body. The problem lines go inside a
@@ -776,7 +778,7 @@ function problems_cmd() {
   if [[ ! -s "${WORK_DIR}/dashboard.json" ]]; then
     log 'no Dependency Dashboard'
     for issue in "${open_issues[@]}"; do
-      finish_issue "${issue}" 'repository problems' 'Dependency Dashboard not found' 'not_planned'
+      finish_issue "${issue}" 'repository problems' 'Dependency Dashboard not found' 'not_planned' ' resolved=1'
     done
     return 0
   fi
@@ -811,7 +813,7 @@ function problems_cmd() {
     fi
     local -i i
     for ((i = 1; i < ${#open_issues[@]}; i++)); do
-      finish_issue "${open_issues[i]}" 'repository problems' 'duplicate' 'not_planned'
+      finish_issue "${open_issues[i]}" 'repository problems' 'duplicate' 'not_planned' ' resolved=1'
     done
     # GitHub may store the body with different trailing whitespace or line
     # endings, so both sides are normalized before comparing.
@@ -829,6 +831,15 @@ function problems_cmd() {
 
   # A person who closed the latest problems issue has seen this exact set;
   # only a different set, or one the job itself resolved, files again.
+  # Outside the window the Dashboard shows only part of the set, which would
+  # never match a hand-closed one, so a hand-close there blocks any new issue
+  # until the next in-window check.
+  if [[ "${in_window}" != 'true' ]] && jq --exit-status '
+    map(select(.state == "closed")) | max_by(.closed_at // "") // null
+    | . != null and (.resolved | not)' "${WORK_DIR}/problem-issues.json" > /dev/null; then
+    log 'the latest problems issue was closed by hand; outside the window, not filing'
+    return 0
+  fi
   if jq --exit-status --arg fp "${fingerprint}" '
     map(select(.state == "closed")) | max_by(.closed_at // "") // null
     | . != null and (.resolved | not) and .fingerprint == $fp' \
@@ -923,7 +934,8 @@ function sweep_cmd() {
 
 # @description Append an outcome line to an issue's body and close it,
 #              without a comment. Optionally append a field to the marker on
-#              the body's first line, before its closing ` -->`.
+#              the body's first line, before its closing ` -->`, unless the
+#              marker already carries it.
 # @arg $1 issue the issue as `{number, body, ...}` JSON
 # @arg $2 subject what the issue tracks, for the log line, e.g. `PR #7`
 # @arg $3 outcome the outcome text
@@ -936,7 +948,8 @@ function finish_issue() {
   jq --compact-output --arg outcome "${outcome}" --arg reason "${reason}" --arg field "${marker_field}" '{
       state: "closed", state_reason: $reason,
       body: ((.body // "" | sub("\\s+$"; "")
-              | if $field == "" then . else sub("^(?<m>[^\n]*?) -->"; "\(.m)\($field) -->") end)
+              | if $field == "" or ((split("\n")[0] // "") | contains($field)) then .
+                else sub("^(?<m>[^\n]*?) -->"; "\(.m)\($field) -->") end)
              + "\n\n**Outcome:** \($outcome)\n")
     }' <<< "${issue}" \
     | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
