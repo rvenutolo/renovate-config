@@ -33,6 +33,10 @@ function caller_if() {
   yq --output-format=json '.' "${CALLER}" | jq --raw-output --arg job "$1" '.jobs[$job].if'
 }
 
+@test "own CI workflow: is named ci" {
+  yaml_assert "${REPO_DIR}/.github/workflows/ci.yml" '.name == "ci"'
+}
+
 @test "reusable workflow: workflow_call only" {
   yaml_assert "${REUSABLE}" '.on | keys == ["workflow_call"]'
 }

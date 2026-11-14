@@ -1,4 +1,4 @@
-# commitlint.config.mjs, through the devShell commitlint that the commit-msg
+# .commitlintrc.mjs, through the devShell commitlint that the commit-msg
 # hook and the CI checks job both run. Each test feeds one commit message
 # on stdin and asserts the verdict. `--cwd` pins config discovery to the repo
 # root, so the test sees the repo's config no matter where bats runs from.
@@ -18,6 +18,11 @@ function lint() {
 
 @test "accepts an ordinary subject" {
   lint 'feat: add a flag'
+  assert_success
+}
+
+@test "accepts GitHub's update-branch merge commit" {
+  lint "Merge branch 'main' into chore/examples-v1.2.0"
   assert_success
 }
 
@@ -86,7 +91,7 @@ function lint() {
   local fixture="${BATS_TEST_TMPDIR}/shadow"
   local fake="${fixture}/node_modules/conventional-changelog-conventionalcommits"
   mkdir --parents "${fixture}/repo" "${fake}"
-  cp "${REPO_DIR}/commitlint.config.mjs" "${fixture}/repo/"
+  cp "${REPO_DIR}/.commitlintrc.mjs" "${fixture}/repo/"
   printf '{"name":"conventional-changelog-conventionalcommits","main":"index.js"}\n' > "${fake}/package.json"
   printf 'module.exports = { default: () => ({ parser: { headerPattern: /^never$/ } }) };\n' > "${fake}/index.js"
 

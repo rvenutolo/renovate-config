@@ -16,7 +16,7 @@ import { delimiter } from "node:path";
 const NODE_PATH = process.env.NODE_PATH;
 if (!NODE_PATH) {
   throw new Error(
-    "commitlint.config.mjs: NODE_PATH is unset; run the devShell commitlint",
+    ".commitlintrc.mjs: NODE_PATH is unset; run the devShell commitlint",
   );
 }
 const require = createRequire(import.meta.url);

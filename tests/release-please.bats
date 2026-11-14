@@ -9,7 +9,7 @@
 function setup() {
   load 'test_helper/common'
   WORKFLOW="${REPO_DIR}/.github/workflows/release-please.yml"
-  CONFIG="${REPO_DIR}/release-please-config.json"
+  CONFIG="${REPO_DIR}/.release-please-config.json"
   MANIFEST="${REPO_DIR}/.release-please-manifest.json"
 }
 
@@ -51,6 +51,13 @@ function yaml_assert() {
     | length == 1
       and .[0]["egress-policy"] == "block"
       and (.[0]["allowed-endpoints"] | split(" ") | map(select(. != "")) | sort) == ["api.github.com:443"]'
+}
+
+@test "release-please workflow: reads the dotfile config and manifest" {
+  yaml_assert "${WORKFLOW}" '[.jobs[].steps[] | select(.uses // "" | startswith("googleapis/release-please-action@"))]
+    | length == 1
+      and .[0].with["config-file"] == ".release-please-config.json"
+      and .[0].with["manifest-file"] == ".release-please-manifest.json"'
 }
 
 @test "release-please config: one simple-type package at the root" {

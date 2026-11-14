@@ -255,7 +255,7 @@ For each consuming repository:
 ## Releasing
 
 Releases are cut by [release-please](https://github.com/googleapis/release-please)
-(`.github/workflows/release-please.yml`, `release-please-config.json`,
+(`.github/workflows/release-please.yml`, `.release-please-config.json`,
 `.release-please-manifest.json`).
 
 1. On every push to `main`, release-please keeps one release PR open. It bumps
