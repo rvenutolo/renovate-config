@@ -64,6 +64,10 @@ check: they match any `chore/examples-` PR from this repository.
 - The failure issue's open and close jobs are serialized separately. If the PR
   closes in the narrow window while a failure run is filing its issue, that
   issue can stay open and needs closing by hand.
+- If updating the examples PR's branch fails (for example on a merge
+  conflict), the release-please run fails on every push until the examples PR
+  is fixed or closed by hand. The release itself is unaffected, because that
+  step runs after release-please.
 - The examples at a release tag show the previous release, because the tagged
   commit predates the release's own SHA. Copy the examples from `main`, never
   from a tag.
