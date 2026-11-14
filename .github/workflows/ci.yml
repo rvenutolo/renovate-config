@@ -1,4 +1,4 @@
-name: CI
+name: ci
 on:
   push:
     branches: [main]
@@ -62,7 +62,7 @@ jobs:
         #
         # The devShell's commitlint, the one the commit-msg hook and
         # tests/commitlint.bats run, so CI cannot judge a message differently;
-        # commitlint.config.mjs also resolves its preset through that
+        # .commitlintrc.mjs also resolves its preset through that
         # commitlint's NODE_PATH. A step here rather than its own job, so it
         # shares this job's Nix setup, sudo and egress allowlist.
         if: github.event_name == 'pull_request'

@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+# @description Point the copyable examples at a release. Rewrites the tag in
+#              the `extends` line of examples/renovate.json5
+#              (`github>rvenutolo/renovate-config#vX.Y.Z`) and every pinned
+#              reusable-workflow reference in
+#              examples/renovate-failure-issue.yml
+#              (`rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@<sha>  # vX.Y.Z`).
+#              Both arguments are validated, and both files are checked for a
+#              pinned reference, before either file is written, so a failure
+#              never leaves the two files pointing at different releases.
+# @arg $1 tag release tag, `vMAJOR.MINOR.PATCH`
+# @arg $2 sha the full lowercase 40-character commit SHA the tag points at
+# @arg $3 root optional, the directory that holds `examples/`; default the
+#      repository root
+# @stderr a `[<script>] <message>` line per action taken or skipped, and the
+#         ERR trap's `[<script>] ERROR: ...` report when a command fails
+# @exitcode 0 at least one file was rewritten
+# @exitcode 1 a malformed or missing argument, or a file without a pinned
+#             reference
+# @exitcode 3 both files already point at this release; nothing was written
+# @exitcode * otherwise the status of a failing local command
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+readonly EXIT_ALREADY_PINNED=3
+
+# Globals, so the EXIT trap and `apply` can reach them.
+WORK_DIR=''
+CHANGED=0
+
+# The caller's pinned reference: the reusable workflow's path, a SHA and a tag
+# comment, separated by exactly two spaces as yamllint's comment rule expects.
+readonly CALLER_PIN='(rvenutolo/renovate-config/\.github/workflows/renovate-failure-issue\.yml@)[0-9a-f]{40}  # v[0-9]+\.[0-9]+\.[0-9]+'
+readonly CONFIG_PIN='(github>rvenutolo/renovate-config#)v[0-9]+\.[0-9]+\.[0-9]+'
+
+# @description Log one line to stderr.
+# @arg $1 message the text to log
+# @stderr the `[<script>] <message>` line
+function log() {
+  printf '[%s] %s\n' "${0##*/}" "$1" >&2
+}
+
+# @description Report a problem with the arguments or the files and exit 1.
+# @arg $1 message what is wrong
+# @stderr the message and the usage line
+# @exitcode 1 always
+function fail() {
+  log "$1"
+  printf 'usage: %s <vX.Y.Z> <40-hex-sha> [<root>]\n' "${0##*/}" >&2
+  exit 1
+}
+
+# @description Print a file with its pinned references rewritten.
+# @arg $1 file the file to read
+# @arg $2 pattern extended regular expression matching one pinned reference
+# @arg $3 replacement sed replacement text; its `\1` is the pattern's group
+# @stdout the rewritten content
+function rewrite() {
+  sed --regexp-extended "s|$2|$3|g" "$1"
+}
+
+# @description Rewrite one example file in place when its content changes.
+# @arg $1 file the file to update
+# @arg $2 new the rewritten content, in a temporary file
+# @stderr whether the file was rewritten or already pointed at the release
+function apply() {
+  if cmp --silent "$1" "$2"; then
+    log "already pinned: $1"
+    return 0
+  fi
+  cat "$2" > "$1"
+  log "updated: $1"
+  CHANGED=1
+}
+
+function main() {
+  [[ $# -ge 2 && $# -le 3 ]] || fail 'expected a tag, a SHA and optionally a root directory'
+  local -r tag="$1"
+  local -r sha="$2"
+  local root
+  root="${3:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+  readonly root
+
+  [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "not a release tag (vX.Y.Z): ${tag}"
+  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || fail "not a full lowercase commit SHA: ${sha}"
+
+  local -r config="${root}/examples/renovate.json5"
+  local -r caller="${root}/examples/renovate-failure-issue.yml"
+  [[ -f "${config}" ]] || fail "no such file: ${config}"
+  [[ -f "${caller}" ]] || fail "no such file: ${caller}"
+  grep --quiet --extended-regexp "${CONFIG_PIN}" "${config}" || fail "no pinned preset reference in ${config}"
+  grep --quiet --extended-regexp "${CALLER_PIN}" "${caller}" || fail "no pinned workflow reference in ${caller}"
+
+  WORK_DIR="$(mktemp --directory)"
+  trap 'rm --recursive --force -- "${WORK_DIR:?}"' EXIT
+
+  rewrite "${config}" "${CONFIG_PIN}" "\\1${tag}" > "${WORK_DIR}/config"
+  rewrite "${caller}" "${CALLER_PIN}" "\\1${sha}  # ${tag}" > "${WORK_DIR}/caller"
+
+  CHANGED=0
+  apply "${config}" "${WORK_DIR}/config"
+  apply "${caller}" "${WORK_DIR}/caller"
+  [[ "${CHANGED}" == 1 ]] || exit "${EXIT_ALREADY_PINNED}"
+}
+
+main "$@"

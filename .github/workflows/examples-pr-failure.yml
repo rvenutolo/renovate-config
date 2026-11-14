@@ -1,0 +1,102 @@
+name: examples-pr-failure
+# Files an issue when the PR that points the copyable examples at a release
+# fails CI, and closes it when the PR closes. Runs scripts/examples-pr from the
+# default branch with the workflow token. A CI run that fails at startup fires
+# no workflow_run event, so it opens no issue.
+on:
+  # Safe despite running with a write token: the checkout is the default
+  # branch, never the PR's code, the untrusted branch name and run URL reach the
+  # script only through env, and the job requires the head to be in this
+  # repository.
+  workflow_run:  # zizmor: ignore[dangerous-triggers]
+    workflows: [ci]
+    types: [completed]
+  # pull_request does not fire for a PR with merge conflicts. Safe for the same
+  # reasons as above: the checkout is the base branch, untrusted values travel
+  # only through env, and the job requires the head to be in this repository.
+  pull_request_target:  # zizmor: ignore[dangerous-triggers]
+    types: [closed]
+permissions: {}
+jobs:
+  failed:
+    name: failed
+    # At job level, so non-matching runs are skipped rather than billed. The
+    # same-repository check keeps a fork PR from a branch named chore/examples-x
+    # from putting attacker-controlled text into an issue. cancelled is
+    # deliberately ignored.
+    if: |-
+      github.event_name == 'workflow_run'
+      && startsWith(github.event.workflow_run.head_branch, 'chore/examples-')
+      && github.event.workflow_run.head_repository.full_name == github.repository
+      && contains(fromJSON('["failure", "timed_out"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read  # check out the script
+      issues: write  # create or comment on the failure issue; create its label
+      pull-requests: read  # find the PR for the failed branch
+    # One run per branch at a time, so two failures of the same PR cannot file
+    # duplicate issues. cancel-in-progress: false lets a running run finish, but
+    # a group holds one pending run and a newer pending run replaces an older
+    # one, so with several quick failures an intermediate comment can be
+    # dropped; the issue still exists once.
+    concurrency:
+      group: examples-pr-failure-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        with:
+          egress-policy: block
+          disable-sudo: true
+          allowed-endpoints: >-
+            api.github.com:443 github.com:443
+      # No ref: the default branch, which holds the script. Never the PR's code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+      - name: File or update the failure issue
+        # The branch name comes from whoever can push one, so it reaches the
+        # script through env, never the run text.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: scripts/examples-pr failed
+  closed:
+    name: closed
+    if: |-
+      github.event_name == 'pull_request_target'
+      && startsWith(github.event.pull_request.head.ref, 'chore/examples-')
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read  # check out the script
+      issues: write  # record the outcome in the failure issue and close it
+    # A group per PR, because a group holds one pending run and a newer one
+    # replaces it: only a second close of the same PR can replace a pending
+    # close, and it does the same work.
+    concurrency:
+      group: examples-pr-failure-closed-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        with:
+          egress-policy: block
+          disable-sudo: true
+          allowed-endpoints: >-
+            api.github.com:443 github.com:443
+      # No ref: the base branch, which holds the script. Never the PR's code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+      - name: Close the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+        run: scripts/examples-pr closed

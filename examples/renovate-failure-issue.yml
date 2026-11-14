@@ -1,15 +1,3 @@
-# Copy to .github/workflows/renovate-failure-issue.yml in a repository that
-# uses the shared Renovate preset. It files an issue when CI fails on a
-# Renovate PR, files one every Monday for each Renovate PR still stuck open
-# after the weekend update window, and closes each issue when its PR closes.
-# Every Sunday it also files one issue for the problems Renovate lists on its
-# Dependency Dashboard, such as a failed lock-file update that left no PR.
-#
-# `workflows: [ci]` must name the repository's own CI workflow.
-#
-# The 0000000... SHA and v0.0.0 below are placeholders until the first release
-# of rvenutolo/renovate-config; Renovate replaces them with the release's commit
-# SHA and tag.
 name: renovate-failure-issue
 on:
   # Safe despite running with a write token: no PR code is checked out, the
@@ -72,7 +60,7 @@ jobs:
       cancel-in-progress: false
     # The pinned path, SHA and tag comment run past common line limits.
     # yamllint disable-line rule:line-length
-    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@14ce733f062638d1b6994a91daacde09f65b7560  # v1.1.0
     with:
       mode: open
       run-id: ${{ format('{0}', github.event.workflow_run.id) }}
@@ -90,7 +78,7 @@ jobs:
       pull-requests: read  # read the closed PR's details
     # The pinned path, SHA and tag comment run past common line limits.
     # yamllint disable-line rule:line-length
-    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@14ce733f062638d1b6994a91daacde09f65b7560  # v1.1.0
     with:
       mode: close
       pr-number: ${{ format('{0}', github.event.pull_request.number) }}
@@ -111,7 +99,7 @@ jobs:
       group: renovate-failure-issue-sweep
       cancel-in-progress: false
     # yamllint disable-line rule:line-length
-    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@14ce733f062638d1b6994a91daacde09f65b7560  # v1.1.0
     with:
       mode: sweep
 
@@ -125,6 +113,6 @@ jobs:
       group: renovate-failure-issue-problems
       cancel-in-progress: false
     # yamllint disable-line rule:line-length
-    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@0000000000000000000000000000000000000000  # v0.0.0
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@14ce733f062638d1b6994a91daacde09f65b7560  # v1.1.0
     with:
       mode: problems
