@@ -7,14 +7,15 @@
 #              without that prefix, or opened by anyone else, a maintainer
 #              included, is never touched.
 #
-#              `open` runs after release-please cut a release. If a PR the app
-#              did not open already uses this release's branch, it stops with
-#              exit 1 before writing anything, since resetting the branch
-#              would destroy that PR's commits. Otherwise it closes every
-#              other open examples PR and deletes its branch, since a newer
-#              release supersedes it. If this release's PR is already open, it
-#              arms auto-merge on it when that is off and stops, so a re-run
-#              of the release workflow creates nothing twice. Otherwise it
+#              `open` runs after release-please cut a release, or when the
+#              release workflow is run by hand with a tag to retry a failed
+#              `open`. If a PR the app did not open already uses this
+#              release's branch, it stops with exit 1 before writing anything,
+#              since resetting the branch would destroy that PR's commits.
+#              Otherwise it closes every other open examples PR and deletes its
+#              branch, since a newer release supersedes it. If this release's
+#              PR is already open, it arms auto-merge on it when that is off
+#              and stops, so a retry creates nothing twice. Otherwise it
 #              rewrites the examples with scripts/update-examples, points the
 #              branch at the release commit, commits both files there through
 #              the GraphQL `createCommitOnBranch` mutation, so GitHub signs the
@@ -23,11 +24,12 @@
 #              method, the only one the repository allows. Examples that
 #              already point at the release need no PR.
 #
-#              `refresh` runs on every other push to `main`. `main` requires
-#              branches to be up to date before they merge, so each examples
-#              PR that is behind `main` gets GitHub's "update a pull request
-#              branch" call, which merges `main` into it in a commit GitHub
-#              signs; CI then reruns and auto-merge proceeds.
+#              `refresh` runs on every run of the release workflow, after
+#              `open` when that runs. `main` requires branches to be up to
+#              date before they merge, so each examples PR that is behind
+#              `main` gets GitHub's "update a pull request branch" call, which
+#              merges `main` into it in a commit GitHub signs; CI then reruns
+#              and auto-merge proceeds.
 #
 #              `failed` runs after a failed CI run on an examples branch. It
 #              finds that branch's open PR in this repository and files an
@@ -48,7 +50,8 @@
 # @arg $1 subcommand `open`, `refresh`, `failed` or `closed`
 # @env GITHUB_REPOSITORY `owner/repo`, every subcommand
 # @env TAG, SHA the release, for `open`: tag `vMAJOR.MINOR.PATCH` and the full
-#      lowercase 40-character commit SHA it points at
+#      lowercase 40-character commit SHA it points at. SHA is optional: when
+#      empty, it is looked up from TAG through the API
 # @env APP_SLUG the release app's slug, for `open` and `refresh`: only PRs
 #      authored by `<APP_SLUG>[bot]` count as examples PRs
 # @env GH_TOKEN the token gh authenticates with; for `open` and `refresh` it
@@ -65,8 +68,9 @@
 #         `[<script>] ERROR: ...` report when a command fails
 # @exitcode 0 the PR was opened, refreshed or closed, or there was
 #             deliberately nothing to do
-# @exitcode 1 a GitHub API call failed, scripts/update-examples rejected the
-#             examples, or someone else's PR uses this release's branch
+# @exitcode 1 a GitHub API call failed, TAG names no commit,
+#             scripts/update-examples rejected the examples, or someone else's
+#             PR uses this release's branch
 # @exitcode 2 a missing or unknown subcommand, or a missing or malformed
 #             environment variable
 # @exitcode * otherwise the status of a failing local command
@@ -262,13 +266,31 @@ function commit_examples() {
   log "committed the examples to ${branch}"
 }
 
+# @description Set SHA to the commit TAG points at. The commits endpoint peels
+#              an annotated tag to its commit.
+# @exitcode 1 the tag does not exist, the lookup failed, or the API returned
+#             no full commit SHA
+function resolve_tag_sha() {
+  local sha
+  sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" \
+    || api_error "resolving ${TAG} to a commit failed; does the tag exist?")"
+  sha="$(jq --raw-output '.sha // empty' <<< "${sha}")"
+  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || api_error "${TAG} resolved to no full commit SHA"
+  SHA="${sha}"
+  log "resolved ${TAG} to ${SHA}"
+}
+
 # @description Open this release's examples PR with auto-merge, after closing
 #              the PRs it supersedes.
 function open_cmd() {
   require_app_slug
-  require_env TAG SHA
+  require_env TAG
   require_format TAG '^v[0-9]+\.[0-9]+\.[0-9]+$' 'vMAJOR.MINOR.PATCH'
-  require_format SHA '^[0-9a-f]{40}$' 'a full lowercase 40-character commit SHA'
+  if [[ -n "${SHA:-}" ]]; then
+    require_format SHA '^[0-9a-f]{40}$' 'a full lowercase 40-character commit SHA'
+  else
+    resolve_tag_sha
+  fi
   local -r branch="${BRANCH_PREFIX}${TAG}"
   local -r headline="chore: point examples at ${TAG}"
   local root

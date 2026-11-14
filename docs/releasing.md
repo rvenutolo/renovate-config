@@ -36,12 +36,16 @@ Renovate does not touch them in this repository; a release does, through a PR.
   on `main` holds), opens a PR titled `chore: point examples at vX.Y.Z` and turns
   on auto-merge with the merge-commit method. The `chore:` type cuts no release.
   The PR is opened by the app so CI runs on it. Any older examples PR still open
-  is closed and its branch deleted, since the new release supersedes it. A re-run
-  of the release workflow creates nothing twice.
+  is closed and its branch deleted, since the new release supersedes it.
+- **Retried by hand.** Re-running the release workflow does not retry the
+  examples PR. Run the `release-please` workflow by hand with the tag
+  (`gh workflow run release-please.yml -f tag=vX.Y.Z`) to open it or re-arm its
+  auto-merge; an examples PR already open is not created twice.
 - **Kept up to date.** `main` requires branches to be up to date, so on every
-  other push to `main` the same workflow runs `scripts/examples-pr refresh`,
-  which merges `main` into an examples PR that has fallen behind (in a commit
-  GitHub signs). CI reruns and auto-merge proceeds.
+  run, after `open` when that runs, the same workflow runs
+  `scripts/examples-pr refresh`, which merges `main` into an examples PR that
+  has fallen behind (in a commit GitHub signs). CI reruns and auto-merge
+  proceeds.
 - **Failure issue.** `.github/workflows/examples-pr-failure.yml` opens an issue
   labeled `examples-pr-failure` when CI fails or times out on an examples PR, or
   comments on the issue already open for that PR. It closes the issue, with a

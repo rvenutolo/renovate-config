@@ -336,12 +336,60 @@ function committed_file() {
   done
   TAG='v9.8.7'
   local sha
-  for sha in '0123' "${RELEASE_SHA^^}" "${RELEASE_SHA}0" ''; do
+  for sha in '0123' "${RELEASE_SHA^^}" "${RELEASE_SHA}0"; do
     SHA="${sha}"
     run "${SCRIPT}" open
     assert_failure 2
   done
   [[ ! -e "${GH_STUB_DIR}/calls.log" ]] || fail 'an API call was made'
+}
+
+@test "open: with no SHA, resolves the tag to its commit and releases from it" {
+  SHA=''
+  stub_response GET 'repos/o/r/commits/v9.8.7' "{\"sha\":\"${RELEASE_SHA}\"}"
+  stub_open_prs '[]'
+  stub_open_writes
+
+  run "${SCRIPT}" open
+  assert_success
+
+  assert_equal "$(call_count GET 'repos/o/r/commits/v9.8.7')" 1
+  run jq --exit-status --arg sha "${RELEASE_SHA}" '.sha == $sha' \
+    <<< "$(request_json POST 'repos/o/r/git/refs')"
+  assert_success
+  local commit
+  commit="$(graphql_request createCommitOnBranch)"
+  run jq --exit-status --arg sha "${RELEASE_SHA}" '.variables.input.expectedHeadOid == $sha' <<< "${commit}"
+  assert_success
+  run committed_file "${commit}" 'examples/renovate-failure-issue.yml'
+  assert_output --partial "renovate-failure-issue.yml@${RELEASE_SHA}  # v9.8.7"
+}
+
+@test "open: with no SHA, a tag that does not exist exits 1 before any write" {
+  SHA=''
+  stub_open_prs '[]'
+  stub_open_writes
+  local before
+  before="$(cat "${EXAMPLES_ROOT}/examples/"*)"
+
+  run "${SCRIPT}" open
+  assert_failure 1
+  assert_output --partial 'v9.8.7'
+
+  assert_no_writes
+  assert_equal "$(cat "${EXAMPLES_ROOT}/examples/"*)" "${before}"
+}
+
+@test "open: with no SHA, a malformed commit SHA from the API exits 1 before any write" {
+  SHA=''
+  stub_response GET 'repos/o/r/commits/v9.8.7' '{"sha":"0123"}'
+  stub_open_prs '[]'
+  stub_open_writes
+
+  run "${SCRIPT}" open
+  assert_failure 1
+
+  assert_no_writes
 }
 
 @test "refresh: updates a behind PR with the merge method" {

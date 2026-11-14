@@ -4,11 +4,20 @@ name: release-please
 # changes bump the version; this repo's own chore(deps) updates never cut a
 # release, so consumers are not bumped for tooling churn. After a release it
 # opens an auto-merging PR that points the copyable examples at it, and every
-# other push merges main into that PR while it is behind, since main only
-# accepts up-to-date branches.
+# run merges main into that PR while it is behind, since main only accepts
+# up-to-date branches.
 on:
   push:
     branches: [main]
+  # release-please marks the release PR tagged in the same step that creates
+  # the release, so a re-run never reports release_created again and cannot
+  # retry a failed examples PR. A manual run with the tag does.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to point the examples at, e.g. v1.2.0
+        required: true
+        type: string
 permissions: {}
 concurrency:
   # Two quick merges must not run release-please side by side against the same
@@ -47,29 +56,36 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
       - id: release
+        if: github.event_name == 'push'
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: .release-please-config.json
           manifest-file: .release-please-manifest.json
       # Only the scripts and examples are read; git never pushes, so the
-      # token is not kept in the clone.
+      # token is not kept in the clone. A manual run checks out the release
+      # it retries; inputs.tag is empty on a push, which keeps the pushed
+      # commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ inputs.tag }}
           persist-credentials: false
       - name: Open the examples PR for the new release
-        if: steps.release.outputs.release_created == 'true'
+        if: steps.release.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Only PRs the app opened are examples PRs; a maintainer's own
           # chore/examples-* PR is left alone.
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          TAG: ${{ steps.release.outputs.tag_name }}
+          # On a manual run the release step is skipped and SHA is empty, so
+          # the script resolves the tag itself.
+          TAG: ${{ inputs.tag || steps.release.outputs.tag_name }}
           SHA: ${{ steps.release.outputs.sha }}
         run: scripts/examples-pr open
+      # Runs after open on every run, so an examples PR that open found or
+      # created behind main is brought up to date at once.
       - name: Bring the examples PR up to date with main
-        if: steps.release.outputs.release_created != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
