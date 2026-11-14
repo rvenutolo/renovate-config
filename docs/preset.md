@@ -39,6 +39,27 @@
 - **Conventional commits.** Commit messages and PR titles look like
   `chore(deps): ...`, and PRs carry the `dependencies` label.
 - **Nix.** `flake.lock` inputs are updated.
+- **pre-commit.** Hook `rev:` values in `.pre-commit-config.yaml` are updated,
+  including SHA pins with a version comment. Renovate ships this manager
+  disabled, so the preset turns it on; it does nothing in a repo without that
+  file.
+- **Tool pins in workflows.** A tool a workflow installs by version is updated
+  when it is annotated like this:
+
+  ```yaml
+  env:
+    # renovate: datasource=github-release-attachments depName=mvdan/sh
+    SHFMT_VERSION: v3.13.1
+    SHFMT_SHA256: fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1
+  ```
+
+  The comment names the datasource and package, and may end with
+  `versioning=<scheme>`. The `<NAME>_VERSION:` line must come directly after
+  it; its value may be quoted. The `<NAME>_SHA256:` line is optional and must
+  come directly after the version line. With it and the
+  `github-release-attachments` datasource, Renovate updates the version and the
+  sha256 together, so the download stays verified. A sha256 separated from its
+  version by any other line is ignored.
 
 The preset extends `config:best-practices` and still sets every behavior above
 explicitly, so an upstream change to that preset cannot silently alter one. The

@@ -114,6 +114,10 @@ function preset_assert() {
     | $age != null and $own != null and $own > $age'
 }
 
+@test "preset: pre-commit manager enabled" {
+  preset_assert '."pre-commit".enabled == true'
+}
+
 @test "preset: every packageRule has a description" {
   preset_assert 'all(.packageRules[]; (.description | type) == "string" or (.description | type) == "array")'
 }
@@ -124,4 +128,67 @@ function preset_assert() {
 
 @test "preset: top-level description explains each setting" {
   preset_assert '(.description | type == "array") and (.description | length >= 10)'
+}
+
+# @description Print the tool-pin regex's captures for $1 as a compact JSON
+#              array, one object per match, using jq's regex engine.
+# @arg $1 string text to match
+function tool_pin_captures() {
+  jq --compact-output --arg text "$1" \
+    '.customManagers[0].matchStrings[0] as $re | [$text | capture($re; "g")]' "${PRESET}"
+}
+
+# @description Assert a jq filter is true for the tool-pin captures of $1.
+# @arg $1 string text to match
+# @arg $2 string jq filter over the captures array
+function tool_pin_assert() {
+  tool_pin_captures "$1" | jq --exit-status "$2" > /dev/null
+}
+
+@test "tool pins: manager scans workflow files only" {
+  preset_assert '.customManagers[0].customType == "regex" and .customManagers[0].managerFilePatterns == ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"]'
+}
+
+@test "tool pins: manager has a description" {
+  preset_assert '(.customManagers[0].description | type) as $t | $t == "string" or $t == "array"'
+}
+
+@test "tool pins: version only, unquoted" {
+  text="$(printf '# renovate: datasource=pypi depName=pre-commit\n  PRE_COMMIT_VERSION: 4.7.0\n')"
+  tool_pin_assert "${text}" 'length == 1 and .[0].datasource == "pypi" and .[0].depName == "pre-commit" and .[0].currentValue == "4.7.0" and ((.[0].currentDigest // "") == "")'
+}
+
+@test "tool pins: single-quoted value" {
+  text="$(printf "# renovate: datasource=npm depName=@anthropic-ai/claude-code\n      CLAUDE_CODE_VERSION: '2.1.317'\n")"
+  tool_pin_assert "${text}" 'length == 1 and .[0].currentValue == "2.1.317" and .[0].depName == "@anthropic-ai/claude-code"'
+}
+
+@test "tool pins: double-quoted value" {
+  text="$(printf '# renovate: datasource=pypi depName=pytest\n  PYTEST_VERSION: "9.1.1"\n')"
+  tool_pin_assert "${text}" 'length == 1 and .[0].currentValue == "9.1.1"'
+}
+
+@test "tool pins: versioning captured" {
+  text="$(printf '# renovate: datasource=github-releases depName=x/y versioning=semver\n  Y_VERSION: 1.2.3\n')"
+  tool_pin_assert "${text}" 'length == 1 and .[0].versioning == "semver" and .[0].depName == "x/y"'
+}
+
+@test "tool pins: version and sha256" {
+  text="$(printf '# renovate: datasource=github-release-attachments depName=mvdan/sh\n  SHFMT_VERSION: v3.13.1\n  SHFMT_SHA256: fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1\n')"
+  tool_pin_assert "${text}" 'length == 1 and .[0].currentValue == "v3.13.1" and .[0].currentDigest == "fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1"'
+}
+
+@test "tool pins: sha256 after a comment line is not captured" {
+  text="$(printf '# renovate: datasource=github-release-attachments depName=mvdan/sh\n  SHFMT_VERSION: v3.13.1\n  # note\n  SHFMT_SHA256: fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1\n')"
+  tool_pin_assert "${text}" 'length == 1 and .[0].currentValue == "v3.13.1" and ((.[0].currentDigest // "") == "")'
+}
+
+@test "tool pins: sha256 after a blank line is not captured" {
+  text="$(printf '# renovate: datasource=github-release-attachments depName=mvdan/sh\n  SHFMT_VERSION: v3.13.1\n\n  SHFMT_SHA256: fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1\n')"
+  tool_pin_assert "${text}" 'length == 1 and ((.[0].currentDigest // "") == "")'
+}
+
+@test "tool pins: two pins in one file match separately" {
+  text="$(printf '# renovate: datasource=pypi depName=pre-commit\n  PRE_COMMIT_VERSION: 4.7.0\n# renovate: datasource=github-release-attachments depName=twpayne/chezmoi\n  CHEZMOI_VERSION: v2.74.1\n')"
+  tool_pin_assert "${text}" 'length == 2 and .[0].depName == "pre-commit" and .[1].depName == "twpayne/chezmoi"'
 }
