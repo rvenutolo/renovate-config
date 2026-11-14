@@ -1,6 +1,6 @@
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
-  extends: ['github>rvenutolo/renovate-config#v1.1.0'],
+  extends: ['github>rvenutolo/renovate-config#v1.2.0'],
   // Settings local to this repository go below and override the preset. A
   // packageRules entry here is applied after the preset's, so it wins; that is
   // also where a different minimumReleaseAge belongs.
