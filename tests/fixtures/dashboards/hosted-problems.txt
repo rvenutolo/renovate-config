@@ -1,0 +1,85 @@
+This issue lists Renovate updates and detected dependencies. Read the [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/) docs to learn more.<br>[View this repository on the Mend.io Web Portal](https://developer.mend.io/github/o/r).
+
+## Repository Problems
+
+These problems occurred while renovating this repository. [View logs](https://developer.mend.io//github/o/r).
+
+ - ⚠️ WARN: Package lookup failures
+ - ⚠️ WARN: Error updating flake.lock
+
+
+---
+
+> [!WARNING]
+> Renovate failed to look up the following dependencies: `Failed to look up git-refs package ssh://git@github.com/example/private-input: no-result`.
+> 
+> Files affected: `flake.nix`
+
+---
+
+
+## Other Branches
+
+The following updates are pending. To force the creation of a PR, click on a checkbox below.
+
+ - [ ] <!-- other-branch=renovate/lock-file-maintenance -->chore(deps): lock file maintenance
+
+## Open
+
+The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.
+
+ - [ ] <!-- rebase-branch=renovate/all-non-major -->[chore(deps): update all non-major dependencies](../pull/1) (`actions/checkout`, `step-security/harden-runner`)
+ - [ ] <!-- rebase-branch=renovate/actions-checkout-7.x -->[chore(deps): update actions/checkout action to v7](../pull/2)
+ - [ ] <!-- rebase-all-open-prs -->**Click on this checkbox to rebase all open PRs at once**
+
+## Detected Dependencies
+
+<details><summary>github-actions (2)</summary>
+<blockquote>
+
+<details><summary>.github/workflows/ci.yml (1)</summary>
+
+ - `step-security/harden-runner v2.22.3@46b06cea07f9e64621fdf066ba77ac6915163d43` → [Updates: `v2.22.4`]
+
+</details>
+
+<details><summary>.github/workflows/dependency-bait.yml (1)</summary>
+
+ - `actions/checkout v4.1.0` → [Updates: `v4.4.0`, `v7.0.1`, `v4.1.0`]
+
+</details>
+
+</blockquote>
+</details>
+
+<details><summary>nix (1)</summary>
+<blockquote>
+
+<details><summary>flake.nix (2)</summary>
+
+ - `nixpkgs nixos-unstable`
+ - `private lock file @ c5130c5613eee3bd8234e42b9022845abf792391`
+
+</details>
+
+</blockquote>
+</details>
+
+<details><summary>renovate-config (1)</summary>
+<blockquote>
+
+<details><summary>renovate.json5 (1)</summary>
+
+ - `rvenutolo/renovate-config v1.0.0`
+
+</details>
+
+</blockquote>
+</details>
+
+---
+
+- [x] <!-- manual job -->Check this box to trigger a request for Renovate to run again on this repository
+
+
+

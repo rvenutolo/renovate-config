@@ -33,7 +33,8 @@ function setup() {
   export RUN_URL='https://github.com/o/r/actions/runs/1001'
   export HEAD_BRANCH='renovate/foo-1.x'
   export RUN_CONCLUSION='failure'
-  unset LOG_TAIL_LINES PR_NUMBER PR_MERGED SWEEP_MIN_AGE_HOURS SWEEP_MERGEABLE_TRIES SWEEP_RETRY_DELAY
+  unset LOG_TAIL_LINES PR_NUMBER PR_MERGED SWEEP_MIN_AGE_HOURS SWEEP_MERGEABLE_TRIES SWEEP_RETRY_DELAY PROBLEMS_NOW
+  FIXTURES="${REPO_DIR}/tests/fixtures/dashboards"
   # The mergeable-state retries would otherwise sleep between tries.
   export SWEEP_RETRY_DELAY=0
 }
@@ -273,6 +274,63 @@ function marker_issue() {
 function stub_closed_pr7() {
   stub_response GET 'repos/o/r/pulls/7' "$(jq --null-input --arg m "$1" \
     '{number: 7, state: "closed", merged_at: (if $m == "" then null else $m end)}')"
+}
+
+# A Sunday afternoon inside the lock-file maintenance window, New York time.
+readonly IN_WINDOW='2026-11-15T21:47:00Z'
+
+# @description Print the Dependency Dashboard issue #3 as the issues list
+#              returns it.
+# @arg $1 body_file the Dashboard body
+# @arg $2 overrides optional jq filter applied to the issue
+# @stdout the issue as compact JSON
+function dashboard_issue() {
+  jq --null-input --compact-output --rawfile body "$1" \
+    "{number: 3, state: \"open\", title: \"Dependency Dashboard\", user: {login: \"renovate[bot]\"},
+      html_url: \"https://github.com/o/r/issues/3\", body: \$body} | ${2:-.}"
+}
+
+# @description Stub the issues listing with the given issues.
+# @arg $@ issues each issue as compact JSON
+function stub_issue_list() {
+  stub_issues "$(printf '%s\n' "$@" | jq --slurp --compact-output '.')"
+}
+
+# @description Stub a problems run over a Dashboard body: the Dashboard as the
+#              only issue, existing labels and a successful create.
+# @arg $1 body_file the Dashboard body
+# @arg $2 overrides optional jq filter applied to the Dashboard issue
+function stub_problems() {
+  stub_issue_list "$(dashboard_issue "$1" "${2:-.}")"
+  stub_labels_exist
+  stub_response POST 'repos/o/r/issues' '{"number":50}'
+}
+
+# @description Print a problems issue as the issues list returns it.
+# @arg $1 number the issue number
+# @arg $2 state `open` or `closed`
+# @arg $3 body the issue body, marker line first
+# @arg $4 closed_at optional close timestamp
+# @stdout the issue as compact JSON
+function problems_issue() {
+  jq --null-input --compact-output --argjson n "$1" --arg state "$2" --arg body "$3" --arg closed "${4:-}" \
+    '{number: $n, state: $state, title: "Renovate reports problems in this repository",
+      user: {login: "github-actions[bot]"}, body: $body,
+      closed_at: (if $closed == "" then null else $closed end)}'
+}
+
+# @description Print the body a first, issue-less in-window problems run
+#              files for a Dashboard, using a throwaway stub directory.
+# @arg $1 body_file the Dashboard body
+# @stdout the filed issue body
+function first_render() {
+  local -r saved="${GH_STUB_DIR}"
+  GH_STUB_DIR="${BATS_TEST_TMPDIR}/first-render"
+  mkdir --parents "${GH_STUB_DIR}"
+  stub_problems "$1"
+  PROBLEMS_NOW="${IN_WINDOW}" "${SCRIPT}" problems > /dev/null 2>&1
+  request_body POST repos/o/r/issues
+  GH_STUB_DIR="${saved}"
 }
 
 @test "open: PR already closed with no failure issue creates no issue" {
@@ -991,6 +1049,367 @@ function stub_closed_pr7() {
   run "${SCRIPT}" sweep
   assert_failure 1
   assert_equal "$(call_count PATCH repos/o/r/issues/42)" 0
+}
+
+@test "problems: hosted Dashboard problems file a labeled issue" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+  request_json POST repos/o/r/issues \
+    | jq --exit-status '.labels == ["dependencies","renovate-failure"]
+      and .title == "Renovate reports problems in this repository"'
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  assert_regex "$(head --lines=1 <<< "${body}")" '^<!-- renovate-problems set=[0-9a-f]{16} -->$'
+  [[ "${body}" == *'⚠️ WARN: Error updating flake.lock'* ]] || fail 'flake.lock problem missing'
+  [[ "${body}" == *'⚠️ WARN: Package lookup failures'* ]] || fail 'lookup problem missing'
+  [[ "${body}" == *'Renovate failed to look up the following dependencies'* ]] || fail 'lookup block missing'
+  [[ "${body}" == *'**Dependency Dashboard:** https://github.com/o/r/issues/3'* ]] || fail 'dashboard link missing'
+  [[ "${body}" == *'**Renovate logs:** https://developer.mend.io/'* ]] || fail 'mend link missing'
+  [[ "${body}" != *'lock file maintenance'* ]] || fail 'an uncounted section leaked in'
+}
+
+@test "problems: main-rendered Dashboard problems are found too" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/main-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  [[ "${body}" == *'⚠️ WARN: Error updating flake.lock'* ]] || fail 'problem line missing'
+  [[ "${body}" == *'⚠️ **Warning**'* ]] || fail 'warning block missing'
+  [[ "${body}" == *'`example-dep`'* ]] || fail 'warning detail missing'
+  [[ "${body}" == *'chore(deps): update foo to v1.1.0'* ]] || fail 'errored branch missing'
+  [[ "${body}" != *'retry-branch'* ]] || fail 'checkbox comment not stripped'
+  [[ "${body}" != *'tried to run on this repository'* ]] || fail 'section header captured'
+  [[ "${body}" != *'encountered an error and will be retried'* ]] || fail 'errored description captured'
+}
+
+@test "problems: a clean Dashboard files nothing" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/clean.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: uncounted sections are ignored" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/uncounted.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: an issue titled Dependency Dashboard by someone else is ignored" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt" '.user.login = "mallory"'
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: a Renovate issue with another title is ignored" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt" '.title = "Other"'
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: Dashboard text cannot break out of the fence or mention anyone" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  printf '%s\n' '## Repository Problems' '' 'header' '' ' - ⚠️ WARN: bad ``` fence @someone' \
+    > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  local body outside
+  body="$(request_body POST repos/o/r/issues)"
+  assert_regex "${body}" $'\n````+text\n'
+  # Drop everything between the opening fence line and its matching close.
+  outside="$(awk '
+    !inside && /^````+text$/ { inside = 1; fence = substr($0, 1, length($0) - 4); next }
+    inside && $0 == fence { inside = 0; next }
+    !inside { print }' <<< "${body}")"
+  [[ "${outside}" != *'@someone'* ]] || fail 'a mention escaped the fenced block'
+}
+
+@test "problems: a Mend link on another host is dropped" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  sed 's#https://developer.mend.io//github/o/r#https://evil.example/x#; s#https://developer.mend.io/github/o/r#https://evil.example/y#' \
+    "${FIXTURES}/hosted-problems.txt" > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" != *'Renovate logs'* ]] || fail 'an off-host log link was kept'
+}
+
+@test "problems: the problem list is truncated to fit the body limit" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  {
+    printf '%s\n' '## Repository Problems' '' 'header' ''
+    printf ' - %s\n' "$(head --bytes=70000 /dev/zero | tr '\0' 'x')"
+  } \
+    > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  local body
+  body="$(request_body POST repos/o/r/issues)"
+  ((${#body} < 65536)) || fail "body is ${#body} characters"
+  [[ "${body}" == *"_Problem list truncated to fit GitHub's issue size limit._"* ]] || fail 'truncation note missing'
+}
+
+@test "problems: never posts a comment" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_comment_calls
+}
+
+@test "usage: an invalid PROBLEMS_NOW exits 2" {
+  export PROBLEMS_NOW=yesterday
+  run "${SCRIPT}" problems
+  assert_failure 2
+}
+
+@test "problems: unchanged problems do not edit the open issue" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  local body
+  body="$(first_render "${FIXTURES}/hosted-problems.txt")"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" "$(problems_issue 40 open "${body}")"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: line-ending and trailing-space noise does not change the fingerprint" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  local body
+  body="$(first_render "${FIXTURES}/hosted-problems.txt")"
+  sed 's/$/  \r/' "${FIXTURES}/hosted-problems.txt" > "${BATS_TEST_TMPDIR}/noisy.txt"
+  stub_problems "${BATS_TEST_TMPDIR}/noisy.txt"
+  stub_issue_list "$(dashboard_issue "${BATS_TEST_TMPDIR}/noisy.txt")" "$(problems_issue 40 open "${body}")"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: changed problems edit the open issue once" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" \
+    "$(problems_issue 40 open $'<!-- renovate-problems set=0000000000000000 -->\nold')"
+  stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/40)" 1
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
+  local body
+  body="$(request_body PATCH repos/o/r/issues/40)"
+  assert_regex "$(head --lines=1 <<< "${body}")" '^<!-- renovate-problems set=[0-9a-f]{16} -->$'
+  [[ "$(head --lines=1 <<< "${body}")" != *0000000000000000* ]] || fail 'fingerprint not updated'
+  assert_no_comment_calls
+}
+
+@test "problems: duplicate open issues keep the oldest and close the rest" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" \
+    "$(problems_issue 41 open $'<!-- renovate-problems set=0000000000000000 -->\nold')" \
+    "$(problems_issue 40 open $'<!-- renovate-problems set=0000000000000000 -->\nold')"
+  stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+  stub_response PATCH 'repos/o/r/issues/41' '{"number":41}'
+  run "${SCRIPT}" problems
+  assert_success
+  request_json PATCH repos/o/r/issues/40 | jq --exit-status '.state == null'
+  request_json PATCH repos/o/r/issues/41 | jq --exit-status '.state == "closed" and .state_reason == "not_planned"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/41)" '\*\*Outcome:\*\* duplicate'
+  assert_regex "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/41)")" ' resolved=1 -->$'
+}
+
+@test "problems: cleared problems close the issue as completed and mark it resolved" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/clean.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/clean.txt")" \
+    "$(problems_issue 40 open $'<!-- renovate-problems set=0123456789abcdef -->\nold')"
+  stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(call_count PATCH repos/o/r/issues/40)" 1
+  request_json PATCH repos/o/r/issues/40 | jq --exit-status '.state == "closed" and .state_reason == "completed"'
+  local body
+  body="$(request_body PATCH repos/o/r/issues/40)"
+  assert_equal "$(head --lines=1 <<< "${body}")" '<!-- renovate-problems set=0123456789abcdef resolved=1 -->'
+  assert_regex "${body}" '\*\*Outcome:\*\* Renovate no longer reports problems'
+}
+
+@test "problems: a hand-closed issue with the same problems is not re-filed" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  local body
+  body="$(first_render "${FIXTURES}/hosted-problems.txt")"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" \
+    "$(problems_issue 40 closed "${body}" '2026-11-10T12:00:00Z')"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: a hand-closed issue with different problems gets a new issue" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" \
+    "$(problems_issue 40 closed $'<!-- renovate-problems set=0000000000000000 -->\nold' '2026-11-10T12:00:00Z')"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+}
+
+@test "problems: only the latest closed issue decides a hand-close" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  local body
+  body="$(first_render "${FIXTURES}/hosted-problems.txt")"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" \
+    "$(problems_issue 40 closed "${body}" '2026-11-01T12:00:00Z')" \
+    "$(problems_issue 41 closed $'<!-- renovate-problems set=0000000000000000 -->\nold' '2026-11-10T12:00:00Z')"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+}
+
+@test "problems: problems returning after a resolved close file a new issue" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  local body
+  body="$(first_render "${FIXTURES}/hosted-problems.txt")"
+  body="$(sed '1s/ -->$/ resolved=1 -->/' <<< "${body}")"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" \
+    "$(problems_issue 40 closed "${body}" '2026-11-10T12:00:00Z')"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+}
+
+@test "problems: outside the window an open issue is never edited or closed" {
+  export PROBLEMS_NOW='2026-11-16T14:17:00Z'
+  local fixture
+  for fixture in clean.txt hosted-problems.txt; do
+    stub_problems "${FIXTURES}/${fixture}"
+    stub_issue_list "$(dashboard_issue "${FIXTURES}/${fixture}")" \
+      "$(problems_issue 40 open $'<!-- renovate-problems set=0000000000000000 -->\nold')"
+    run "${SCRIPT}" problems
+    assert_success
+  done
+  assert_no_issue_writes
+}
+
+@test "problems: outside the window a new problem still files an issue" {
+  export PROBLEMS_NOW='2026-11-16T14:17:00Z'
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+}
+
+@test "problems: no Dashboard closes the open problems issue as not_planned" {
+  export PROBLEMS_NOW='2026-11-16T14:17:00Z'
+  stub_issue_list "$(problems_issue 40 open $'<!-- renovate-problems set=0123456789abcdef -->\nold')"
+  stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+  run "${SCRIPT}" problems
+  assert_success
+  request_json PATCH repos/o/r/issues/40 | jq --exit-status '.state == "closed" and .state_reason == "not_planned"'
+  assert_regex "$(request_body PATCH repos/o/r/issues/40)" '\*\*Outcome:\*\* Dependency Dashboard not found'
+}
+
+@test "problems: the window boundaries are exact across DST" {
+  local spec now expected
+  for spec in \
+    '2026-10-31T21:59:00Z out' '2026-10-31T22:00:00Z in' \
+    '2026-11-01T22:59:00Z in' '2026-11-01T23:00:00Z out' \
+    '2026-11-07T22:59:00Z out' '2026-11-07T23:00:00Z in' \
+    '2026-03-14T22:00:00Z in' \
+    '2026-10-25T21:59:00Z in' '2026-10-25T22:00:00Z out'; do
+    now="${spec% *}" expected="${spec#* }"
+    export GH_STUB_DIR="${BATS_TEST_TMPDIR}/window-${now//:/}"
+    mkdir --parents "${GH_STUB_DIR}"
+    stub_problems "${FIXTURES}/clean.txt"
+    stub_issue_list "$(dashboard_issue "${FIXTURES}/clean.txt")" \
+      "$(problems_issue 40 open $'<!-- renovate-problems set=0123456789abcdef -->\nold')"
+    stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+    PROBLEMS_NOW="${now}" run "${SCRIPT}" problems
+    assert_success
+    if [[ "${expected}" == 'in' ]]; then
+      assert_equal "$(call_count PATCH repos/o/r/issues/40)" 1
+    else
+      assert_equal "$(call_count PATCH repos/o/r/issues/40)" 0
+    fi
+  done
+}
+
+@test "problems: the window matches the preset's lock-file maintenance schedule" {
+  jq --exit-status '.timezone == "America/New_York"
+    and .lockFileMaintenance.schedule == ["* 18-23 * * 6", "* 0-17 * * 0"]' \
+    "${REPO_DIR}/default.json" > /dev/null
+}
+
+@test "sweep: problems issues are never touched by the per-PR modes" {
+  stub_open_prs '[]'
+  stub_issue_list "$(problems_issue 40 open $'<!-- renovate-problems set=0123456789abcdef -->\nold')"
+  run "${SCRIPT}" sweep
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: problems returning after a not-found close file a new issue" {
+  export PROBLEMS_NOW='2026-11-16T14:17:00Z'
+  stub_issue_list "$(problems_issue 40 open $'<!-- renovate-problems set=0123456789abcdef -->\nold')"
+  stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+  run "${SCRIPT}" problems
+  assert_success
+  local closed
+  closed="$(request_body PATCH repos/o/r/issues/40)"
+  assert_regex "$(head --lines=1 <<< "${closed}")" ' resolved=1 -->$'
+}
+
+@test "problems: outside the window a hand-closed issue is never followed by a new one" {
+  export PROBLEMS_NOW='2026-11-16T14:17:00Z'
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/hosted-problems.txt")" \
+    "$(problems_issue 40 closed $'<!-- renovate-problems set=0000000000000000 -->\nold' '2026-11-15T22:30:00Z')"
+  run "${SCRIPT}" problems
+  assert_success
+  assert_no_issue_writes
+}
+
+@test "problems: closing a reopened resolved issue keeps a single resolved field" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/clean.txt"
+  stub_issue_list "$(dashboard_issue "${FIXTURES}/clean.txt")" \
+    "$(problems_issue 40 open $'<!-- renovate-problems set=0123456789abcdef resolved=1 -->\nold')"
+  stub_response PATCH 'repos/o/r/issues/40' '{"number":40}'
+  run "${SCRIPT}" problems
+  assert_success
+  assert_equal "$(head --lines=1 <<< "$(request_body PATCH repos/o/r/issues/40)")" \
+    '<!-- renovate-problems set=0123456789abcdef resolved=1 -->'
+}
+
+@test "problems: markup after a Mend link never reaches the issue" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  sed 's#https://developer.mend.io//github/o/r#https://developer.mend.io/<details><summary>x</summary>#; s#https://developer.mend.io/github/o/r#https://developer.mend.io/<img src=x>#' \
+    "${FIXTURES}/hosted-problems.txt" > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  local logs
+  logs="$(grep --fixed-strings '**Renovate logs:**' <<< "$(request_body POST repos/o/r/issues)" || true)"
+  [[ "${logs}" != *'<'* ]] || fail "markup reached the log link: ${logs}"
 }
 
 @test "usage: unknown subcommand exits 2" {

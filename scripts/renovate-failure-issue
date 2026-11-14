@@ -38,12 +38,22 @@
 #              issue whose PR is open but no longer counts as stuck. An issue
 #              whose PR cannot be found is left open.
 #
-#              Branch names, PR titles and bodies, job names and job logs are
+#              `problems` runs on Sunday before the update window closes. It
+#              reads Renovate's Dependency Dashboard (the open issue by
+#              `renovate[bot]` titled "Dependency Dashboard") and files one
+#              issue per repository listing the problems Renovate reports
+#              there: the "Repository Problems" list, the lookup-failure
+#              block, and the "Errored" branches. That issue's first line is
+#
+#                <!-- renovate-problems set=<fingerprint>[ resolved=1] -->
+#
+#              Branch names, PR titles and bodies, job names, job logs and the
+#              Dashboard body are
 #              untrusted: they reach jq only through --arg, --rawfile or stdin,
 #              and reach gh only as request bodies on stdin, never as program
 #              text or as part of a command line other than the URL-encoded
 #              branch in the PR lookup.
-# @arg $1 subcommand `open`, `close` or `sweep`
+# @arg $1 subcommand `open`, `close`, `sweep` or `problems`
 # @env GITHUB_REPOSITORY `owner/repo`, every subcommand
 # @env RUN_ID, RUN_URL, HEAD_BRANCH, RUN_CONCLUSION the failed run, for `open`;
 #      RUN_CONCLUSION is one of `failure`, `timed_out`, `startup_failure`
@@ -54,6 +64,9 @@
 #      default 3
 # @env SWEEP_RETRY_DELAY optional, for `sweep`: seconds between those reads;
 #      default 2
+# @env PROBLEMS_NOW optional, for `problems`: the time, as an ISO 8601 UTC
+#      timestamp, at which to decide whether the run is inside the update
+#      window; default the current time
 # @env PR_NUMBER, PR_MERGED the closed PR, for `close`; PR_MERGED is `true` or
 #      `false`
 # @env LOG_TAIL_LINES optional, how many trailing lines of each failed job's
@@ -83,6 +96,9 @@ readonly BODY_LIMIT=65000
 # GitHub rejects an issue title over 256 characters.
 readonly TITLE_LIMIT=256
 readonly TRUNCATION_NOTE="_Log output truncated to fit GitHub's issue size limit._"
+readonly PROBLEMS_TRUNCATION_NOTE="_Problem list truncated to fit GitHub's issue size limit._"
+readonly PROBLEMS_TITLE='Renovate reports problems in this repository'
+readonly PROBLEMS_WHAT_TO_DO='Fix what Renovate reports, or adjust the Renovate config so it no longer reports it. This issue closes by itself once a Renovate run inside the Saturday 6pm to Sunday 6pm window (New York time) reports no problems. Closing it by hand silences these exact problems until they change.'
 # The backticks are Markdown code spans, not command substitutions.
 # shellcheck disable=SC2016
 readonly HOW_TO_FIX='Fix the problem on `main`, then tick the rebase checkbox in the PR; a manual rebase request overrides the schedule. Alternatively, push the fix to the Renovate branch: Renovate stops rebasing a branch with foreign commits, but GitHub auto-merge stays armed, so once CI is green the PR merges by itself as long as it is up to date with `main`.'
@@ -115,7 +131,7 @@ function log() {
 # @exitcode 2 always
 function usage_error() {
   log "$1"
-  printf 'usage: %s open|close|sweep (configured through the environment)\n' "${0##*/}" >&2
+  printf 'usage: %s open|close|sweep|problems (configured through the environment)\n' "${0##*/}" >&2
   exit 2
 }
 
@@ -589,6 +605,252 @@ function write_stuck_issue() {
   fi
 }
 
+# @description Print every issue in this repository, open or closed. One
+#              listing serves both the Dashboard lookup and the problems issue
+#              lookup; both filter it themselves.
+# @stdout compact JSON array of issues
+function issues_all() {
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=all&per_page=100" > "${WORK_DIR}/issues-all.raw"
+  jq --slurp --compact-output 'add // []' "${WORK_DIR}/issues-all.raw"
+}
+
+# @description Print Renovate's Dependency Dashboard: the oldest open issue,
+#              not a pull request, authored by `renovate[bot]` and titled
+#              `Dependency Dashboard`.
+# @stdin the issues listing from issues_all
+# @stdout compact JSON `{number, html_url, body}`, or nothing
+function find_dashboard() {
+  jq --compact-output '
+    map(select(.state == "open" and .pull_request == null
+      and .user.login == "renovate[bot]" and .title == "Dependency Dashboard"))
+    | min_by(.number) // empty | {number, html_url, body: (.body // "")}'
+}
+
+# @description Print the problems a Dependency Dashboard body reports, in
+#              the order they appear: the list items under "## Repository
+#              Problems", every line of the quote block that names lookup
+#              failures, and the list items under "## Errored". Lines lose
+#              carriage returns, trailing whitespace and HTML comments.
+# @stdin the Dashboard body
+# @stdout the problem lines
+function dashboard_problems() {
+  awk '
+    function flush() {
+      if (quote ~ /Renovate failed to look up the following dependencies/) {
+        printf "%s", quote
+      }
+      quote = ""
+    }
+    {
+      sub(/\r$/, "")
+      gsub(/<!--[^>]*-->/, "")
+      sub(/[ \t]+$/, "")
+    }
+    /^>/ { quote = quote $0 "\n"; next }
+    { flush() }
+    /^## / { section = $0; listed = 0; next }
+    /^---$/ { section = ""; next }
+    section == "## Repository Problems" {
+      if ($0 ~ /^ - /) { print; listed = 1 }
+      else if ($0 != "" && listed) { section = "" }
+      next
+    }
+    section == "## Errored" && /^ - / { print }
+    END { flush() }'
+}
+
+# @description Print the fingerprint of a problem set: the first 16 hex
+#              characters of the SHA-256 of its lines, sorted and deduplicated,
+#              so the order Renovate lists them in does not matter.
+# @stdin the problem lines
+# @stdout the fingerprint
+function problems_fingerprint() {
+  LC_ALL=C sort --unique | sha256sum | cut --characters=1-16
+}
+
+# @description Print the Mend log link from a Dashboard body, if it has one
+#              on developer.mend.io; a link to any other host is dropped, and
+#              the link stops at the first character outside a plain URL path,
+#              so no markup after it reaches the issue.
+# @stdin the Dashboard body
+# @stdout the URL, or nothing
+function mend_log_url() {
+  jq --raw-input --slurp --raw-output '
+    [match("https://developer\\.mend\\.io/[A-Za-z0-9/_.~%-]*"; "g").string][0] // empty'
+}
+
+# @description Render the problems issue body. The problem lines go inside a
+#              code fence longer than any backtick run they contain, so
+#              nothing in them renders as a mention or link, and are cut to
+#              keep the body under BODY_LIMIT.
+# @stdin JSON `{fingerprint, problems, dashboard_url, mend_url}`
+# @stdout the body
+function render_problems_body() {
+  jq --raw-output --argjson limit "${BODY_LIMIT}" --arg note "${PROBLEMS_TRUNCATION_NOTE}" \
+    --arg title "${PROBLEMS_TITLE}" --arg what_to_do "${PROBLEMS_WHAT_TO_DO}" '
+    def fence: ([scan("`+") | length] | max // 0) as $run | "`" * ([3, $run + 1] | max);
+    ($limit - 2000) as $budget
+    | (.problems | sub("\n$"; "")) as $text
+    | (if ($text | length) > $budget then [($text[:$budget] | sub("\n[^\n]*$"; "")), true]
+       else [$text, false] end) as [$shown, $cut]
+    | ($shown | fence) as $f
+    | [ "<!-- renovate-problems set=\(.fingerprint) -->",
+        "Renovate reports problems on its Dependency Dashboard that no pull request will show.",
+        "",
+        "**Dependency Dashboard:** \(.dashboard_url)",
+        (if .mend_url != "" then "**Renovate logs:** \(.mend_url)" else empty end),
+        "",
+        "## Problems",
+        "",
+        "\($f)text",
+        $shown,
+        $f,
+        (if $cut then "", $note else empty end),
+        "",
+        "## What to do",
+        "",
+        $what_to_do
+      ] | join("\n") + "\n"'
+}
+
+# @description Print every problems issue, open or closed: those whose
+#              body starts with the `renovate-problems` marker.
+# @stdin the issues listing from issues_all
+# @stdout compact JSON array of
+#         `{number, state, fingerprint, resolved, closed_at, body}`
+function problem_issues() {
+  jq --compact-output '
+    [ .[] | select(.pull_request == null)
+      | ((.body // "") | split("\n")[0] // "" | sub("\r$"; "")
+         | capture("^<!-- renovate-problems set=(?<fp>[0-9a-f]{16})(?<resolved> resolved=1)? -->$")) as $m
+      | {number, state, fingerprint: $m.fp, resolved: ($m.resolved != null), closed_at, body: (.body // "")}
+    ]'
+}
+
+# @description Succeed if a time falls inside the preset's lock-file
+#              maintenance window, Saturday 18:00 to Sunday 18:00
+#              America/New_York, the same window as `default.json`'s
+#              `lockFileMaintenance.schedule`. Only a Dashboard written inside
+#              it lists schedule-bound problems such as a failed lock-file
+#              update.
+# @arg $1 epoch the time, in seconds since the epoch
+# @exitcode 0 inside the window
+# @exitcode 1 outside it
+function in_problems_window() {
+  local -r epoch="$1"
+  local stamp
+  stamp="$(TZ=America/New_York date --date="@${epoch}" '+%u %H%M')"
+  local -ri weekday="${stamp% *}" clock="10#${stamp#* }"
+  ((weekday == 6 && clock >= 1800)) || ((weekday == 7 && clock < 1800))
+}
+
+# @description Mirror the Dependency Dashboard's problems into this
+#              repository's problems issue. Inside the window the issue
+#              follows the Dashboard: created, rewritten when the problems
+#              change, closed when they clear. Outside it the Dashboard omits
+#              schedule-bound problems, so an open issue is left alone and a
+#              new one is only ever created. A hand-closed issue silences the
+#              exact problem set it listed.
+# @exitcode 0 the issue was written, or there was nothing to do
+function problems_cmd() {
+  require_env GITHUB_REPOSITORY
+  require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
+  if [[ -n "${PROBLEMS_NOW:-}" ]]; then
+    require_format PROBLEMS_NOW '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' 'an ISO 8601 UTC timestamp'
+  fi
+
+  local -i now
+  now="$(date --utc --date="${PROBLEMS_NOW:-now}" '+%s')"
+  local in_window=false
+  if in_problems_window "${now}"; then
+    in_window=true
+  fi
+
+  issues_all > "${WORK_DIR}/issues-all.json"
+  problem_issues < "${WORK_DIR}/issues-all.json" > "${WORK_DIR}/problem-issues.json"
+  jq --compact-output 'map(select(.state == "open")) | sort_by(.number) | .[]' \
+    "${WORK_DIR}/problem-issues.json" > "${WORK_DIR}/open-problems.jsonl"
+  local -a open_issues
+  mapfile -t open_issues < "${WORK_DIR}/open-problems.jsonl"
+  local issue
+
+  find_dashboard < "${WORK_DIR}/issues-all.json" > "${WORK_DIR}/dashboard.json"
+  if [[ ! -s "${WORK_DIR}/dashboard.json" ]]; then
+    log 'no Dependency Dashboard'
+    for issue in "${open_issues[@]}"; do
+      finish_issue "${issue}" 'repository problems' 'Dependency Dashboard not found' 'not_planned' ' resolved=1'
+    done
+    return 0
+  fi
+  jq --raw-output '.body' "${WORK_DIR}/dashboard.json" > "${WORK_DIR}/dashboard.md"
+  dashboard_problems < "${WORK_DIR}/dashboard.md" > "${WORK_DIR}/problems.txt"
+
+  if [[ ! -s "${WORK_DIR}/problems.txt" ]]; then
+    if [[ "${in_window}" != 'true' ]]; then
+      log 'no problems listed, but outside the window; leaving any problems issue alone'
+      return 0
+    fi
+    for issue in "${open_issues[@]}"; do
+      finish_issue "${issue}" 'repository problems' 'Renovate no longer reports problems' 'completed' ' resolved=1'
+    done
+    log 'the Dependency Dashboard reports no problems'
+    return 0
+  fi
+
+  local fingerprint mend_url
+  fingerprint="$(problems_fingerprint < "${WORK_DIR}/problems.txt")"
+  mend_url="$(mend_log_url < "${WORK_DIR}/dashboard.md")"
+  jq --null-input --arg fingerprint "${fingerprint}" --rawfile problems "${WORK_DIR}/problems.txt" \
+    --arg mend_url "${mend_url}" --slurpfile dashboard "${WORK_DIR}/dashboard.json" '
+    {fingerprint: $fingerprint, problems: $problems, mend_url: $mend_url,
+     dashboard_url: $dashboard[0].html_url}' \
+    | render_problems_body > "${WORK_DIR}/problems-body.md"
+
+  if ((${#open_issues[@]} > 0)); then
+    if [[ "${in_window}" != 'true' ]]; then
+      log 'outside the window; leaving the open problems issue alone'
+      return 0
+    fi
+    local -i i
+    for ((i = 1; i < ${#open_issues[@]}; i++)); do
+      finish_issue "${open_issues[i]}" 'repository problems' 'duplicate' 'not_planned' ' resolved=1'
+    done
+    # GitHub may store the body with different trailing whitespace or line
+    # endings, so both sides are normalized before comparing.
+    if jq --exit-status --rawfile rendered "${WORK_DIR}/problems-body.md" '
+      def norm: gsub("\r"; "") | sub("\\s+$"; "");
+      (.body | norm) == ($rendered | norm)' <<< "${open_issues[0]}" > /dev/null; then
+      log 'the problems issue is up to date'
+      return 0
+    fi
+    local updated
+    updated="$(upsert_issue "${open_issues[0]}" "${PROBLEMS_TITLE}" "${WORK_DIR}/problems-body.md")"
+    log "updated problems issue #${updated} (set ${fingerprint})"
+    return 0
+  fi
+
+  # A person who closed the latest problems issue has seen this exact set;
+  # only a different set, or one the job itself resolved, files again.
+  # Outside the window the Dashboard shows only part of the set, which would
+  # never match a hand-closed one, so a hand-close there blocks any new issue
+  # until the next in-window check.
+  if [[ "${in_window}" != 'true' ]] && jq --exit-status '
+    map(select(.state == "closed")) | max_by(.closed_at // "") // null
+    | . != null and (.resolved | not)' "${WORK_DIR}/problem-issues.json" > /dev/null; then
+    log 'the latest problems issue was closed by hand; outside the window, not filing'
+    return 0
+  fi
+  if jq --exit-status --arg fp "${fingerprint}" '
+    map(select(.state == "closed")) | max_by(.closed_at // "") // null
+    | . != null and (.resolved | not) and .fingerprint == $fp' \
+    "${WORK_DIR}/problem-issues.json" > /dev/null; then
+    log "problems set ${fingerprint} was closed by hand; not filing it again"
+    return 0
+  fi
+  upsert_issue '' "${PROBLEMS_TITLE}" "${WORK_DIR}/problems-body.md" > /dev/null
+  log "created problems issue (set ${fingerprint})"
+}
+
 # @description Print every open PR in this repository.
 # @stdout compact JSON array of PRs
 function open_prs() {
@@ -645,7 +907,7 @@ function sweep_cmd() {
     pr="$(jq --raw-output '.pr' <<< "${entry}")"
     why="$(jq --raw-output '.why' <<< "${entry}")"
     if [[ "${why}" == 'not-stuck' ]]; then
-      finish_issue "${issue}" "${pr}" 'no longer stuck: auto-merge is off or the PR is a draft' 'not_planned'
+      finish_issue "${issue}" "PR #${pr}" 'no longer stuck: auto-merge is off or the PR is a draft' 'not_planned'
       continue
     fi
     # A PR that cannot be found would otherwise fail every later sweep and
@@ -663,29 +925,35 @@ function sweep_cmd() {
     fi
     case "$(jq --raw-output 'if .state == "open" then "open" elif .merged_at != null then "merged" else "closed" end' \
       "${WORK_DIR}/closed-pr.json")" in
-      merged) finish_issue "${issue}" "${pr}" 'merged' 'completed' ;;
-      closed) finish_issue "${issue}" "${pr}" 'closed without merging' 'not_planned' ;;
+      merged) finish_issue "${issue}" "PR #${pr}" 'merged' 'completed' ;;
+      closed) finish_issue "${issue}" "PR #${pr}" 'closed without merging' 'not_planned' ;;
       *) log "PR #${pr} opened after the PR listing; leaving its issue" ;;
     esac
   done
 }
 
 # @description Append an outcome line to an issue's body and close it,
-#              without a comment.
+#              without a comment. Optionally append a field to the marker on
+#              the body's first line, before its closing ` -->`, unless the
+#              marker already carries it.
 # @arg $1 issue the issue as `{number, body, ...}` JSON
-# @arg $2 pr the PR number, for the log line
+# @arg $2 subject what the issue tracks, for the log line, e.g. `PR #7`
 # @arg $3 outcome the outcome text
 # @arg $4 reason the GitHub `state_reason`, `completed` or `not_planned`
+# @arg $5 marker_field optional text to add to the marker, e.g. ` resolved=1`
 function finish_issue() {
-  local -r issue="$1" pr="$2" outcome="$3" reason="$4"
+  local -r issue="$1" subject="$2" outcome="$3" reason="$4" marker_field="${5:-}"
   local issue_number
   issue_number="$(jq --raw-output '.number' <<< "${issue}")"
-  jq --compact-output --arg outcome "${outcome}" --arg reason "${reason}" '{
+  jq --compact-output --arg outcome "${outcome}" --arg reason "${reason}" --arg field "${marker_field}" '{
       state: "closed", state_reason: $reason,
-      body: ((.body // "" | sub("\\s+$"; "")) + "\n\n**Outcome:** \($outcome)\n")
+      body: ((.body // "" | sub("\\s+$"; "")
+              | if $field == "" or ((split("\n")[0] // "") | contains($field)) then .
+                else sub("^(?<m>[^\n]*?) -->"; "\(.m)\($field) -->") end)
+             + "\n\n**Outcome:** \($outcome)\n")
     }' <<< "${issue}" \
     | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --input - > /dev/null
-  log "closed issue #${issue_number} for PR #${pr} (${outcome})"
+  log "closed issue #${issue_number} for ${subject} (${outcome})"
 }
 
 # @description Record a closed PR's outcome in its failure issue and close the
@@ -707,7 +975,7 @@ function close_issue() {
     outcome='merged'
     reason='completed'
   fi
-  finish_issue "${existing}" "${pr}" "${outcome}" "${reason}"
+  finish_issue "${existing}" "PR #${pr}" "${outcome}" "${reason}"
 }
 
 # @description Handle a closed PR: record the outcome and close its failure
@@ -726,7 +994,7 @@ function close_cmd() {
 function main() {
   local -r subcommand="${1:-}"
   case "${subcommand}" in
-    open | close | sweep) ;;
+    open | close | sweep | problems) ;;
     *) usage_error "unknown subcommand: ${subcommand:-<none>}" ;;
   esac
   if (($# > 1)); then

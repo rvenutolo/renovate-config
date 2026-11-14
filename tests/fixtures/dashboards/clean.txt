@@ -1,0 +1,8 @@
+This issue lists Renovate updates and detected dependencies. Read the [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/) docs to learn more.
+
+This repository currently has no open or pending branches.
+
+## Detected Dependencies
+
+<details><summary>nix (1)</summary>
+</details>

@@ -1,8 +1,9 @@
 # renovate-config
 
 Shared [Renovate](https://docs.renovatebot.com/) preset, plus a reusable
-GitHub Actions workflow that files an issue when CI fails on a Renovate PR or
-when a Renovate PR is still stuck open after the weekly update window.
+GitHub Actions workflow that files an issue when CI fails on a Renovate PR,
+when a Renovate PR is still stuck open after the weekly update window, and when
+Renovate reports problems on its Dependency Dashboard.
 
 The preset is `default.json`. Consuming repositories extend it with one line,
 pinned to a release tag.
@@ -83,7 +84,8 @@ Emails are kept to a minimum:
   the PR's issue the same way, so the issue ends up closed whichever run comes
   last.
 - GitHub emails when an issue opens and may email when it closes, so expect one
-  or two emails per breakage, and per stuck PR.
+  or two emails per breakage, per stuck PR, and per new set of Dashboard
+  problems.
 
 Issues are only filed for PRs from branches of the same repository, never for
 fork PRs.
@@ -97,8 +99,9 @@ run, and a newer event would replace a pending close.
 
 Once a week, after the update window, the caller's `sweep` job looks for
 Renovate PRs that should have merged but did not. It runs on Monday at 14:17
-UTC (9:17am EST, 10:17am EDT), set by the cron `17 14 * * 1` in the caller,
-which a consumer may change; it can also be run by hand from the Actions tab.
+UTC (9:17am EST, 10:17am EDT), set by the cron `17 14 * * 1` in the caller.
+A consumer may change it, along with the same string in the `sweep` job's `if:`;
+the sweep can also be run by hand from the Actions tab.
 
 A PR counts as stuck when it is open, its branch is a `renovate/*` branch of
 the same repository, it is not a draft, GitHub auto-merge is still enabled on
@@ -121,6 +124,48 @@ the same issue becomes its failure issue. The sweep also closes, without a
 comment, every issue whose PR has closed (covering a missed `close` run) and
 every stuck issue whose PR no longer counts as stuck. A stuck issue closed by
 hand while its PR stays stuck is filed again by the next sweep.
+
+### Repository problems
+
+Some Renovate failures leave no PR to attach an issue to. A failed
+`nix flake update`, for example, leaves nothing to commit, so Renovate only
+lists the error on its Dependency Dashboard issue. Every Sunday at 19:47 UTC
+(2:47pm EST, 3:47pm EDT), set by the cron `47 19 * * 0`, the caller's
+`problems` job reads the Dashboard and files one issue for the whole
+repository, titled `Renovate reports problems in this repository`, with the
+same labels as the other issues.
+
+It counts three things on the Dashboard: the "Repository Problems" list, the
+block naming dependencies Renovate failed to look up, and the "Errored"
+updates. Pending, scheduled, blocked and informational lists are not problems.
+Renovate's text is copied into a code block, so nothing in it renders as a
+mention or a link.
+
+Renovate only lists a problem tied to a schedule, such as a lock-file update,
+on runs inside that schedule; outside it the problem drops off the Dashboard.
+So the issue follows the Dashboard only inside the lock-file maintenance
+window, Saturday 6pm to Sunday 6pm New York time, which is why the check runs
+on Sunday afternoon, hours before the window closes:
+
+- Problems listed: the issue is created, or rewritten without a comment when
+  the problems change.
+- No problems listed: the issue closes.
+- A run outside the window (by hand) can create the issue but never rewrites
+  or closes it.
+
+Closing the issue by hand silences exactly the problems it listed: the next
+check files a new issue only if the list has changed. If the Dashboard is
+turned off or closed, an open problems issue closes.
+
+The check depends on a few settings the preset makes:
+
+- The Dependency Dashboard must stay enabled, under its default title
+  `Dependency Dashboard` (the preset pins it).
+- `suppressNotifications: ["dependencyLookupWarnings"]` hides the
+  lookup-failure block from the Dashboard, and so from the issue.
+- A consumer that moves `lockFileMaintenance.schedule` still gets closes only
+  inside the preset's window, and should keep the Sunday cron inside the
+  window too.
 
 ## Adopting it in a repo
 
@@ -233,13 +278,12 @@ variable `RELEASE_APP_CLIENT_ID` and its private key the repository secret
 
 ## Known gaps
 
-- Renovate artifact errors get no issue of their own.
-  - A failed `nix flake update` leaves nothing to commit, so Renovate opens no
-    branch or PR. The error shows only under "Repository Problems" on the
-    Dependency Dashboard.
-  - For a manager whose package file still changes, Renovate opens the PR with
-    an artifact-problem comment. If the PR stays open, its stuck issue notes the
-    comment; if CI passes and it merges, nothing is reported.
+- An artifact error on a PR that does open gets no issue of its own. For a
+  manager whose package file still changes, Renovate opens the PR with an
+  artifact-problem comment and does not list it on the Dashboard. If the PR
+  stays open, its stuck issue notes the comment; if CI passes and it merges,
+  nothing is reported. (A failed `nix flake update`, which leaves no PR, is
+  reported by the Sunday problems issue.)
 - A CI run that fails at startup, such as one using an action outside the
   Actions allowlist, fires no `workflow_run` event, so it gets no failure issue.
   The PR stays open with auto-merge armed, and the next sweep files a stuck

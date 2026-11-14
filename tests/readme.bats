@@ -40,3 +40,8 @@ function setup() {
   grep --fixed-strings --quiet 'is stuck' "${README}"
   grep --fixed-strings --quiet '17 14 * * 1' "${README}"
 }
+
+@test "readme: describes the Sunday problems check" {
+  grep --fixed-strings --quiet 'Renovate reports problems in this repository' "${README}"
+  grep --fixed-strings --quiet '47 19 * * 0' "${README}"
+}
