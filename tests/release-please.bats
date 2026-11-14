@@ -78,6 +78,7 @@ function step_index() {
       and .[0].if == "steps.release.outputs.release_created == '\''true'\''"
       and .[0].env == {
         "GH_TOKEN": "${{ steps.app-token.outputs.token }}",
+        "APP_SLUG": "${{ steps.app-token.outputs.app-slug }}",
         "TAG": "${{ steps.release.outputs.tag_name }}",
         "SHA": "${{ steps.release.outputs.sha }}"
       }
@@ -88,7 +89,10 @@ function step_index() {
   yaml_assert "${WORKFLOW}" '[.jobs[].steps[] | select(.run // "" | contains("scripts/examples-pr refresh"))]
     | length == 1
       and .[0].if == "steps.release.outputs.release_created != '\''true'\''"
-      and .[0].env == {"GH_TOKEN": "${{ steps.app-token.outputs.token }}"}
+      and .[0].env == {
+        "GH_TOKEN": "${{ steps.app-token.outputs.token }}",
+        "APP_SLUG": "${{ steps.app-token.outputs.app-slug }}"
+      }
       and (.[0].run | contains("${{") | not)'
 }
 

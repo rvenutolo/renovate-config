@@ -32,6 +32,7 @@ function setup() {
   export GITHUB_REPOSITORY='o/r'
   export TAG='v9.8.7'
   export SHA="${RELEASE_SHA}"
+  export APP_SLUG='release-app'
   export EXAMPLES_ROOT="${BATS_TEST_TMPDIR}/root"
   mkdir --parents "${EXAMPLES_ROOT}"
   cp --recursive "${REPO_DIR}/examples" "${EXAMPLES_ROOT}/examples"
@@ -50,8 +51,8 @@ function stub_response() {
 }
 
 # @description Print one open PR as the pulls list returns it: this
-#              repository's examples PR for v9.8.7 with auto-merge armed,
-#              unless the overrides say otherwise.
+#              repository's examples PR for v9.8.7, opened by the release
+#              app, with auto-merge armed, unless the overrides say otherwise.
 # @arg $1 number the PR number
 # @arg $2 overrides optional jq filter applied to the PR
 # @stdout the PR as compact JSON
@@ -60,7 +61,7 @@ function examples_pr() {
   jq --null-input --compact-output --argjson number "${number}" \
     --arg branch "${BRANCH}" --arg sha "${HEAD_SHA}" \
     "{number: \$number, node_id: \"PR_node\\(\$number)\", state: \"open\",
-      auto_merge: {merge_method: \"merge\"},
+      auto_merge: {merge_method: \"merge\"}, user: {login: \"release-app[bot]\"},
       head: {ref: \$branch, sha: \$sha, repo: {full_name: \"o/r\"}}} | ${overrides}"
 }
 
@@ -71,7 +72,8 @@ function stub_open_prs() {
 }
 
 # @description Stub every write `open` makes on the way to a new PR: the ref
-#              create, the GraphQL calls, and the PR create (#12).
+#              create, the GraphQL calls, and the PR create, which returns
+#              fixture PR number 12.
 function stub_open_writes() {
   stub_response POST 'repos/o/r/git/refs' "{\"ref\":\"refs/heads/${BRANCH}\"}"
   stub_response POST 'graphql' \
@@ -240,6 +242,49 @@ function committed_file() {
   assert_equal "$(call_count POST 'repos/o/r/pulls')" 1
 }
 
+@test "open: leaves a maintainer's own chore/examples- PR and branch alone" {
+  stub_open_prs "[$(examples_pr 3 '.head.ref = "chore/examples-v1.0.0" | .user.login = "maintainer"')]"
+  stub_open_writes
+
+  run "${SCRIPT}" open
+  assert_success
+
+  assert_equal "$(call_count PATCH 'repos/o/r/pulls/3')" 0
+  run grep '^CALL DELETE ' "${GH_STUB_DIR}/calls.log"
+  assert_failure
+  assert_equal "$(call_count POST 'repos/o/r/pulls')" 1
+}
+
+@test "open: a maintainer's PR from this release's branch stops the run before any write" {
+  stub_open_prs "[$(examples_pr 9 '.user.login = "maintainer" | .auto_merge = null'),
+    $(examples_pr 3 '.head.ref = "chore/examples-v1.0.0"')]"
+  stub_open_writes
+  stub_response GET "repos/o/r/git/ref/heads/${BRANCH}" '{"object":{"sha":"ffffffffffffffffffffffffffffffffffffffff"}}'
+  local before
+  before="$(cat "${EXAMPLES_ROOT}/examples/"*)"
+
+  run "${SCRIPT}" open
+  assert_failure 1
+  assert_output --partial '#9'
+
+  # Neither armed nor reset as if it were the app's PR, and nothing else
+  # written either, the superseded app PR included.
+  assert_no_writes
+  assert_equal "$(cat "${EXAMPLES_ROOT}/examples/"*)" "${before}"
+}
+
+@test "open and refresh: a missing or malformed APP_SLUG exits 2 before any API call" {
+  local slug subcommand
+  for subcommand in open refresh; do
+    for slug in '' 'Release App' 'app[bot]' '-app'; do
+      APP_SLUG="${slug}"
+      run "${SCRIPT}" "${subcommand}"
+      assert_failure 2
+    done
+  done
+  [[ ! -e "${GH_STUB_DIR}/calls.log" ]] || fail 'an API call was made'
+}
+
 @test "open: a leftover branch with no PR is reset to the release sha" {
   stub_open_prs '[]'
   stub_open_writes
@@ -317,6 +362,17 @@ function committed_file() {
 @test "refresh: leaves an up-to-date PR alone" {
   stub_open_prs "[$(examples_pr 12)]"
   stub_response GET "repos/o/r/compare/main...${HEAD_SHA}" '{"behind_by":0,"ahead_by":1}'
+
+  run "${SCRIPT}" refresh
+  assert_success
+
+  assert_no_writes
+}
+
+@test "refresh: leaves a maintainer's own behind chore/examples- PR alone" {
+  stub_open_prs "[$(examples_pr 3 '.head.ref = "chore/examples-v1.0.0" | .user.login = "maintainer"')]"
+  stub_response GET "repos/o/r/compare/main...${HEAD_SHA}" '{"behind_by":2,"ahead_by":1}'
+  stub_response PUT 'repos/o/r/pulls/3/update-branch' '{"message":"Updating pull request branch."}'
 
   run "${SCRIPT}" refresh
   assert_success

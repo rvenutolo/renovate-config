@@ -2,10 +2,15 @@
 
 # @description Keep the PR that points the copyable examples at the latest
 #              release open, armed and up to date. The PR's branch is
-#              `chore/examples-<tag>` in this repository; a PR from a fork, or
-#              from a branch without that prefix, is never touched.
+#              `chore/examples-<tag>` in this repository and its author is the
+#              release app (`<APP_SLUG>[bot]`); a PR from a fork, from a branch
+#              without that prefix, or opened by anyone else, a maintainer
+#              included, is never touched.
 #
-#              `open` runs after release-please cut a release. It closes every
+#              `open` runs after release-please cut a release. If a PR the app
+#              did not open already uses this release's branch, it stops with
+#              exit 1 before writing anything, since resetting the branch
+#              would destroy that PR's commits. Otherwise it closes every
 #              other open examples PR and deletes its branch, since a newer
 #              release supersedes it. If this release's PR is already open, it
 #              arms auto-merge on it when that is off and stops, so a re-run
@@ -31,6 +36,8 @@
 # @env GITHUB_REPOSITORY `owner/repo`, every subcommand
 # @env TAG, SHA the release, for `open`: tag `vMAJOR.MINOR.PATCH` and the full
 #      lowercase 40-character commit SHA it points at
+# @env APP_SLUG the release app's slug, for `open` and `refresh`: only PRs
+#      authored by `<APP_SLUG>[bot]` count as examples PRs
 # @env GH_TOKEN the token gh authenticates with; it must be one whose PRs
 #      trigger CI, so not the workflow token
 # @env EXAMPLES_ROOT optional, for `open`: the directory that holds
@@ -40,8 +47,8 @@
 #         `[<script>] ERROR: ...` report when a command fails
 # @exitcode 0 the PR was opened, refreshed or closed, or there was
 #             deliberately nothing to do
-# @exitcode 1 a GitHub API call failed, or scripts/update-examples rejected
-#             the examples
+# @exitcode 1 a GitHub API call failed, scripts/update-examples rejected the
+#             examples, or someone else's PR uses this release's branch
 # @exitcode 2 a missing or unknown subcommand, or a missing or malformed
 #             environment variable
 # @exitcode * otherwise the status of a failing local command
@@ -56,10 +63,10 @@ readonly BRANCH_PREFIX='chore/examples-'
 readonly EXIT_ALREADY_PINNED=3
 readonly CONFIG_FILE='examples/renovate.json5'
 readonly CALLER_FILE='examples/renovate-failure-issue.yml'
-# jq: the open PRs that are examples PRs of this repository. head.repo is null
-# when the head repository was deleted, which compares unequal to $repo.
+# jq: the open PRs from an examples branch of this repository. head.repo is
+# null when the head repository was deleted, which compares unequal to $repo.
 # shellcheck disable=SC2016
-readonly EXAMPLES_PRS='[.[] | select(((.head.ref // "") | startswith($prefix)) and .head.repo.full_name == $repo)]'
+readonly EXAMPLES_BRANCH_PRS='[.[] | select(((.head.ref // "") | startswith($prefix)) and .head.repo.full_name == $repo)]'
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -124,12 +131,25 @@ function gh_api() {
   gh api "$@" || api_error "gh api ${*} failed"
 }
 
-# @description Print this repository's open examples PRs.
-# @stdout compact JSON array of `{number, node_id, ref, sha, auto_merge}`
-function examples_prs() {
+# @description Fail with exit 2 unless APP_SLUG is set and shaped like a
+#              GitHub App slug.
+# @exitcode 2 APP_SLUG is missing or malformed
+function require_app_slug() {
+  require_env APP_SLUG
+  require_format APP_SLUG '^[a-z0-9][a-z0-9-]*$' 'a GitHub App slug'
+}
+
+# @description Print this repository's open PRs from an examples branch, each
+#              marked with whether the release app opened it. Only those it
+#              opened are examples PRs; the others are reported so `open`
+#              never rewrites a branch someone else's PR is using. Needs
+#              APP_SLUG.
+# @stdout compact JSON array of `{number, node_id, ref, sha, auto_merge, ours}`
+function examples_branch_prs() {
   gh_api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
     | jq --slurp --compact-output --arg prefix "${BRANCH_PREFIX}" --arg repo "${GITHUB_REPOSITORY}" \
-      "add // [] | ${EXAMPLES_PRS} | map({number, node_id, ref: .head.ref, sha: .head.sha, auto_merge})"
+      --arg author "${APP_SLUG}[bot]" "add // [] | ${EXAMPLES_BRANCH_PRS}
+        | map({number, node_id, ref: .head.ref, sha: .head.sha, auto_merge, ours: (.user.login == \$author)})"
 }
 
 # @description Whether a branch name is safe to put in an API path: an
@@ -226,6 +246,7 @@ function commit_examples() {
 # @description Open this release's examples PR with auto-merge, after closing
 #              the PRs it supersedes.
 function open_cmd() {
+  require_app_slug
   require_env TAG SHA
   require_format TAG '^v[0-9]+\.[0-9]+\.[0-9]+$' 'vMAJOR.MINOR.PATCH'
   require_format SHA '^[0-9a-f]{40}$' 'a full lowercase 40-character commit SHA'
@@ -235,8 +256,17 @@ function open_cmd() {
   root="${EXAMPLES_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}"
   readonly root
 
-  local prs
-  prs="$(examples_prs)"
+  local all prs foreign
+  all="$(examples_branch_prs)"
+  # Resetting the branch would destroy the commits of a PR someone else opened
+  # from it, so that conflict stops the run for a person to resolve.
+  foreign="$(jq --raw-output --arg branch "${branch}" \
+    'map(select(.ref == $branch and (.ours | not)) | "#\(.number)") | join(", ")' <<< "${all}")"
+  if [[ -n "${foreign}" ]]; then
+    api_error "${branch} is the head of PR ${foreign}, not opened by ${APP_SLUG}[bot]; close it or rename its branch, then re-run"
+  fi
+  prs="$(jq --compact-output 'map(select(.ours))' <<< "${all}")"
+
   local number ref
   while IFS=$'\t' read -r number ref; do
     close_superseded "${number}" "${ref}"
@@ -284,8 +314,9 @@ function open_cmd() {
 
 # @description Merge `main` into every examples PR that is behind it.
 function refresh_cmd() {
+  require_app_slug
   local prs
-  prs="$(examples_prs)"
+  prs="$(examples_branch_prs | jq --compact-output 'map(select(.ours))')"
   if [[ "$(jq 'length' <<< "${prs}")" == 0 ]]; then
     log 'no open examples PR'
     return 0
