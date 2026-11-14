@@ -232,6 +232,23 @@ function caller_if() {
   [[ "${exempt_lines}" -eq "${uses_lines}" ]]
 }
 
+@test "examples: every line not exempted fits a consumer's 120-character limit" {
+  # This repo's own yamllint could be loosened again; the examples are copied
+  # into repos whose yamllint keeps the common 120-character limit.
+  local file
+  for file in "${CALLER}" "${EXAMPLE_CONFIG}"; do
+    run awk '
+      length($0) > 120 && prev !~ /^ *# yamllint disable-line rule:line-length/ { print FILENAME ":" FNR }
+      { prev = $0 }' "${file}"
+    assert_success
+    assert_output ''
+  done
+}
+
+@test "yamllint: line length is capped at 120" {
+  yaml_assert "${REPO_DIR}/.yamllint.yml" '.rules["line-length"].max == 120'
+}
+
 @test "examples-pr-failure workflow: triggers are workflow_run on ci and pull_request_target closed" {
   yaml_assert "${EXAMPLES_FAILURE}" '(.on | keys) == ["pull_request_target","workflow_run"]
     and .on.workflow_run.workflows == ["ci"] and .on.workflow_run.types == ["completed"]
