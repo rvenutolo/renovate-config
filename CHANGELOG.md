@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.3.0](https://github.com/rvenutolo/renovate-config/compare/v1.2.1...v1.3.0) (2026-11-14)
+
+
+### Features
+
+* enable pre-commit and update annotated tool pins ([#21](https://github.com/rvenutolo/renovate-config/issues/21)) ([fafee82](https://github.com/rvenutolo/renovate-config/commit/fafee8253fdc8c8ed0f3a19f2c17dbc8f09bcbc2))
+* enable the pre-commit manager ([d7b524f](https://github.com/rvenutolo/renovate-config/commit/d7b524fa58e80825b5b4ee8b880c5e8b833678dc))
+* update annotated tool pins in workflows ([65febb0](https://github.com/rvenutolo/renovate-config/commit/65febb0397c34794cfdb20b9194136dd0f2ed097))
+
 ## [1.2.1](https://github.com/rvenutolo/renovate-config/compare/v1.2.0...v1.2.1) (2026-11-14)
 
 
