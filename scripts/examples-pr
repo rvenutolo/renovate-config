@@ -29,17 +29,35 @@
 #              branch" call, which merges `main` into it in a commit GitHub
 #              signs; CI then reruns and auto-merge proceeds.
 #
+#              `failed` runs after a failed CI run on an examples branch. It
+#              finds that branch's open PR in this repository and files an
+#              issue labeled `examples-pr-failure`, found again through the
+#              marker `<!-- examples-pr-failure pr=<N> -->` on the body's
+#              first line, or comments on the issue already open for the PR.
+#              A branch with no open PR has nothing to report.
+#
+#              `closed` runs when an examples PR closes and closes that PR's
+#              failure issue with a comment saying whether it merged.
+#
+#              `failed` and `closed` run with the workflow token, need no
+#              APP_SLUG, and never write to a PR.
+#
 #              Branch names from the API are untrusted: they reach jq only
 #              through --arg or stdin, and reach a URL only after matching the
 #              examples branch pattern.
-# @arg $1 subcommand `open` or `refresh`
+# @arg $1 subcommand `open`, `refresh`, `failed` or `closed`
 # @env GITHUB_REPOSITORY `owner/repo`, every subcommand
 # @env TAG, SHA the release, for `open`: tag `vMAJOR.MINOR.PATCH` and the full
 #      lowercase 40-character commit SHA it points at
 # @env APP_SLUG the release app's slug, for `open` and `refresh`: only PRs
 #      authored by `<APP_SLUG>[bot]` count as examples PRs
-# @env GH_TOKEN the token gh authenticates with; it must be one whose PRs
-#      trigger CI, so not the workflow token
+# @env GH_TOKEN the token gh authenticates with; for `open` and `refresh` it
+#      must be one whose PRs trigger CI, so not the workflow token; `failed`
+#      and `closed` use the workflow token
+# @env HEAD_BRANCH, RUN_URL for `failed`: the failed run's head branch and its
+#      URL in this repository
+# @env PR_NUMBER, PR_MERGED for `closed`: the closed PR's number and whether
+#      it merged, `true` or `false`
 # @env EXAMPLES_ROOT optional, for `open`: the directory that holds
 #      `examples/`; default the repository root
 # @stderr a `[<script>] <message>` line per action taken or skipped, gh's own
@@ -63,6 +81,7 @@ readonly BRANCH_PREFIX='chore/examples-'
 readonly EXIT_ALREADY_PINNED=3
 readonly CONFIG_FILE='examples/renovate.json5'
 readonly CALLER_FILE='examples/renovate-failure-issue.yml'
+readonly FAILURE_LABEL='examples-pr-failure'
 # jq: the open PRs from an examples branch of this repository. head.repo is
 # null when the head repository was deleted, which compares unequal to $repo.
 # shellcheck disable=SC2016
@@ -84,7 +103,7 @@ function log() {
 # @exitcode 2 always
 function usage_error() {
   log "$1"
-  printf 'usage: %s open|refresh (configured through the environment)\n' "${0##*/}" >&2
+  printf 'usage: %s open|refresh|failed|closed (configured through the environment)\n' "${0##*/}" >&2
   exit 2
 }
 
@@ -339,10 +358,122 @@ function refresh_cmd() {
   done < <(jq --raw-output '.[] | [.number, .sha] | @tsv' <<< "${prs}")
 }
 
+# @description Create the examples failure label unless it exists. A 422 on
+#              create means a concurrent run created it first, which is fine.
+# @exitcode 1 the lookup failed other than with a 404, or the create failed
+#             other than with a 422
+function ensure_failure_label() {
+  local err
+  # stderr is captured to tell a 404 from other failures; stdout, gh's echo of
+  # the error body, is discarded.
+  # shellcheck disable=SC2069
+  if err="$(gh api "repos/${GITHUB_REPOSITORY}/labels/${FAILURE_LABEL}" 2>&1 > /dev/null)"; then
+    return 0
+  fi
+  if [[ "${err}" != *'(HTTP 404)'* ]]; then
+    printf '%s\n' "${err}" >&2
+    api_error "looking up label ${FAILURE_LABEL} failed"
+  fi
+  # shellcheck disable=SC2069
+  if err="$(jq --null-input --arg name "${FAILURE_LABEL}" \
+    '{name: $name, color: "d73a4a", description: "An examples PR whose CI failed"}' \
+    | gh api --method POST "repos/${GITHUB_REPOSITORY}/labels" --input - 2>&1 > /dev/null)"; then
+    log "created label ${FAILURE_LABEL}"
+    return 0
+  fi
+  if [[ "${err}" == *'(HTTP 422)'* ]]; then
+    return 0
+  fi
+  printf '%s\n' "${err}" >&2
+  api_error "creating label ${FAILURE_LABEL} failed"
+}
+
+# @description Print the number of the oldest open failure issue whose body
+#              starts with the marker line for a PR, or nothing.
+# @arg $1 pr the PR number
+# @stdout the issue number, or nothing
+function find_failure_issue() {
+  local -r pr="$1"
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=${FAILURE_LABEL}&state=open&per_page=100" \
+    | jq --slurp --raw-output --arg marker "<!-- examples-pr-failure pr=${pr} -->" '
+      [add // [] | .[] | select(.pull_request == null)
+        | select(((.body // "") | split("\n")[0] | sub("\r$"; "")) == $marker) | .number]
+      | min // empty'
+}
+
+# @description Post a comment on an issue.
+# @arg $1 issue the issue number
+# @arg $2 text the comment text
+function comment_on_issue() {
+  jq --null-input --arg body "$2" '{body: $body}' \
+    | gh_api --method POST "repos/${GITHUB_REPOSITORY}/issues/$1/comments" --input - > /dev/null
+}
+
+# @description Open an issue for an examples PR whose CI failed, or comment on
+#              the one already open for it.
+function failed_cmd() {
+  require_env HEAD_BRANCH RUN_URL
+  safe_branch "${HEAD_BRANCH}" || usage_error 'invalid HEAD_BRANCH: expected an examples branch name'
+  local -r run_prefix="https://github.com/${GITHUB_REPOSITORY}/actions/runs/"
+  if [[ "${RUN_URL}" != "${run_prefix}"* || ! "${RUN_URL#"${run_prefix}"}" =~ ^[0-9]+$ ]]; then
+    usage_error 'invalid RUN_URL: expected a run URL of this repository'
+  fi
+
+  local number
+  number="$(gh_api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+    | jq --slurp --raw-output --arg prefix "${BRANCH_PREFIX}" --arg repo "${GITHUB_REPOSITORY}" --arg ref "${HEAD_BRANCH}" \
+      "add // [] | ${EXAMPLES_BRANCH_PRS} | map(select(.head.ref == \$ref) | .number) | first // empty")"
+  if [[ -z "${number}" ]]; then
+    log "no open PR for ${HEAD_BRANCH}; nothing to report"
+    return 0
+  fi
+
+  local issue
+  issue="$(find_failure_issue "${number}")"
+  if [[ -n "${issue}" ]]; then
+    comment_on_issue "${issue}" "CI failed again on this PR: ${RUN_URL}"
+    log "commented on issue #${issue} for PR #${number}"
+    return 0
+  fi
+
+  ensure_failure_label
+  local -r tag="${HEAD_BRANCH#"${BRANCH_PREFIX}"}"
+  local -r pr_url="https://github.com/${GITHUB_REPOSITORY}/pull/${number}"
+  local body
+  body="$(printf '<!-- examples-pr-failure pr=%s -->\nCI failed on the PR that points the copyable examples at %s: %s\n\nFailed run: %s\n\nThe PR does not merge until CI passes. Fix the cause and re-run CI, or close the PR; this issue closes when the PR does.\n' \
+    "${number}" "${tag}" "${pr_url}" "${RUN_URL}")"
+  jq --null-input --arg title "Examples PR #${number} for ${tag} failed CI" --arg body "${body}" --arg label "${FAILURE_LABEL}" \
+    '{title: $title, body: $body, labels: [$label]}' \
+    | gh_api --method POST "repos/${GITHUB_REPOSITORY}/issues" --input - > /dev/null
+  log "opened an issue for PR #${number}"
+}
+
+# @description Close the failure issue of an examples PR that was merged or
+#              closed, noting which.
+function closed_cmd() {
+  require_env PR_NUMBER PR_MERGED
+  require_format PR_NUMBER '^[0-9]+$' 'a PR number'
+  require_format PR_MERGED '^(true|false)$' 'true or false'
+  local issue
+  issue="$(find_failure_issue "${PR_NUMBER}")"
+  if [[ -z "${issue}" ]]; then
+    log "no open failure issue for PR #${PR_NUMBER}"
+    return 0
+  fi
+  if [[ "${PR_MERGED}" == true ]]; then
+    comment_on_issue "${issue}" "PR #${PR_NUMBER} was merged; closing."
+  else
+    comment_on_issue "${issue}" "PR #${PR_NUMBER} was closed without merging; closing."
+  fi
+  jq --null-input '{state: "closed", state_reason: "completed"}' \
+    | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/${issue}" --input - > /dev/null
+  log "closed issue #${issue} for PR #${PR_NUMBER}"
+}
+
 function main() {
   local -r subcommand="${1:-}"
   case "${subcommand}" in
-    open | refresh) ;;
+    open | refresh | failed | closed) ;;
     *) usage_error "unknown subcommand: ${subcommand:-<none>}" ;;
   esac
   if (($# > 1)); then

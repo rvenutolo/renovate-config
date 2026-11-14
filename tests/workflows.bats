@@ -15,6 +15,7 @@ function setup() {
   CALLER="${REPO_DIR}/examples/renovate-failure-issue.yml"
   EXAMPLE_CONFIG="${REPO_DIR}/examples/renovate.json5"
   OWN_CONFIG="${REPO_DIR}/.github/renovate.json5"
+  EXAMPLES_FAILURE="${REPO_DIR}/.github/workflows/examples-pr-failure.yml"
 }
 
 # @description Assert a jq filter is true for a YAML file.
@@ -229,4 +230,67 @@ function caller_if() {
   exempt_lines="$(grep --before-context=1 --extended-regexp -- "${pinned}" "${CALLER}" | grep --count --extended-regexp -- "${exempt}" || true)"
   [[ "${uses_lines}" -eq 4 ]]
   [[ "${exempt_lines}" -eq "${uses_lines}" ]]
+}
+
+@test "examples-pr-failure workflow: triggers are workflow_run on ci and pull_request_target closed" {
+  yaml_assert "${EXAMPLES_FAILURE}" '(.on | keys) == ["pull_request_target","workflow_run"]
+    and .on.workflow_run.workflows == ["ci"] and .on.workflow_run.types == ["completed"]
+    and .on.pull_request_target.types == ["closed"]'
+}
+
+@test "examples-pr-failure workflow: no workflow-level permissions" {
+  yaml_assert "${EXAMPLES_FAILURE}" '.permissions == {}'
+}
+
+@test "examples-pr-failure workflow: failed job needs an examples branch of this repository and a failed run" {
+  yaml_assert "${EXAMPLES_FAILURE}" '.jobs.failed.if
+    | contains("github.event_name == '"'"'workflow_run'"'"'")
+    and contains("startsWith(github.event.workflow_run.head_branch, '"'"'chore/examples-'"'"')")
+    and contains("github.event.workflow_run.head_repository.full_name == github.repository")
+    and contains("[\"failure\", \"timed_out\"]")
+    and contains("github.event.workflow_run.conclusion")
+    and (contains("startup_failure") | not) and (contains("cancelled") | not)'
+}
+
+@test "examples-pr-failure workflow: closed job needs an examples branch of this repository" {
+  yaml_assert "${EXAMPLES_FAILURE}" '.jobs.closed.if
+    | contains("github.event_name == '"'"'pull_request_target'"'"'")
+    and contains("startsWith(github.event.pull_request.head.ref, '"'"'chore/examples-'"'"')")
+    and contains("github.event.pull_request.head.repo.full_name == github.repository")'
+}
+
+@test "examples-pr-failure workflow: each job grants only issues write, pull-requests read and contents read" {
+  # contents: read is for the checkout of the script; a job-level grant
+  # replaces the default, so a private repository needs it named.
+  yaml_assert "${EXAMPLES_FAILURE}" '.jobs | length == 2 and all(.[];
+    .permissions == {"issues": "write", "pull-requests": "read", "contents": "read"})'
+}
+
+@test "examples-pr-failure workflow: no step checks out a PR ref" {
+  yaml_assert "${EXAMPLES_FAILURE}" '[.jobs[].steps[] | select((.uses // "") | startswith("actions/checkout@"))]
+    | length == 2 and all(.[]; (.with | has("ref") | not) and .with["persist-credentials"] == false)'
+}
+
+@test "examples-pr-failure workflow: untrusted values reach run steps only through env" {
+  yaml_assert "${EXAMPLES_FAILURE}" '[.jobs[].steps[] | select(has("run")) | .run]
+    | length == 2 and all(.[]; contains("${{") | not)'
+  yaml_assert "${EXAMPLES_FAILURE}" '.jobs.failed.steps[] | select(has("run"))
+    | .env.HEAD_BRANCH == "${{ github.event.workflow_run.head_branch }}"
+      and .env.RUN_URL == "${{ github.event.workflow_run.html_url }}"'
+  yaml_assert "${EXAMPLES_FAILURE}" '.jobs.closed.steps[] | select(has("run"))
+    | .env.PR_NUMBER == "${{ github.event.pull_request.number }}"
+      and .env.PR_MERGED == "${{ github.event.pull_request.merged }}"'
+}
+
+@test "examples-pr-failure workflow: every job hardens the runner with an egress block" {
+  yaml_assert "${EXAMPLES_FAILURE}" 'all(.jobs[]; .["timeout-minutes"] != null
+    and (.steps[0].uses | startswith("step-security/harden-runner@"))
+    and .steps[0].with["egress-policy"] == "block"
+    and .steps[0].with["allowed-endpoints"] == "api.github.com:443 github.com:443")'
+}
+
+@test "examples-pr-failure workflow: both dangerous triggers carry a zizmor ignore" {
+  run grep --count --extended-regexp '^  (workflow_run|pull_request_target):  # zizmor: ignore\[dangerous-triggers\]$' "${EXAMPLES_FAILURE}"
+  assert_success
+  assert_output '2'
 }

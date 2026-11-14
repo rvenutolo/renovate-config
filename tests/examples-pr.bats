@@ -391,6 +391,135 @@ function committed_file() {
   assert_equal "$(call_count GET "repos/o/r/compare/main...${HEAD_SHA}")" 0
 }
 
+# @description Stub the examples-pr-failure label as already existing.
+function stub_label() {
+  stub_response GET 'repos/o/r/labels/examples-pr-failure' '{"name":"examples-pr-failure"}'
+}
+
+# @description Print one open issue as the issues list returns it, with the
+#              marker for PR 12 as its first line unless overridden.
+# @arg $1 number the issue number
+# @arg $2 overrides optional jq filter applied to the issue
+# @stdout the issue as compact JSON
+function failure_issue() {
+  local -r number="$1" overrides="${2:-.}"
+  jq --null-input --compact-output --argjson number "${number}" \
+    "{number: \$number, state: \"open\",
+      body: \"<!-- examples-pr-failure pr=12 -->\\nPR link\"} | ${overrides}"
+}
+
+readonly RUN_URL_FIXTURE='https://github.com/o/r/actions/runs/555'
+
+@test "failed: opens an issue with the marker, title and both links" {
+  export HEAD_BRANCH="${BRANCH}" RUN_URL="${RUN_URL_FIXTURE}"
+  unset APP_SLUG
+  stub_open_prs "[$(examples_pr 12)]"
+  stub_label
+  stub_response GET 'repos/o/r/issues' '[]'
+  stub_response POST 'repos/o/r/issues' '{"number":30}'
+
+  run "${SCRIPT}" failed
+  assert_success
+
+  local request
+  request="$(request_json POST repos/o/r/issues)"
+  jq --exit-status '.title == "Examples PR #12 for v9.8.7 failed CI"
+    and .labels == ["examples-pr-failure"]' <<< "${request}"
+  [[ "$(jq --raw-output '.body' <<< "${request}" | head --lines=1)" == '<!-- examples-pr-failure pr=12 -->' ]]
+  jq --exit-status --arg run "${RUN_URL_FIXTURE}" \
+    '.body | contains("https://github.com/o/r/pull/12") and contains($run)' <<< "${request}"
+}
+
+@test "failed: creates the label when it is missing" {
+  export HEAD_BRANCH="${BRANCH}" RUN_URL="${RUN_URL_FIXTURE}"
+  stub_open_prs "[$(examples_pr 12)]"
+  stub_response GET 'repos/o/r/issues' '[]'
+  stub_response POST 'repos/o/r/labels' '{"name":"examples-pr-failure"}'
+  stub_response POST 'repos/o/r/issues' '{"number":30}'
+
+  run "${SCRIPT}" failed
+  assert_success
+
+  jq --exit-status '.name == "examples-pr-failure"' <<< "$(request_json POST repos/o/r/labels)"
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+}
+
+@test "failed: comments on the existing issue instead of a duplicate" {
+  export HEAD_BRANCH="${BRANCH}" RUN_URL="${RUN_URL_FIXTURE}"
+  stub_open_prs "[$(examples_pr 12)]"
+  stub_label
+  stub_response GET 'repos/o/r/issues' "[$(failure_issue 30), $(failure_issue 31 '.body = "<!-- examples-pr-failure pr=99 -->"')]"
+  stub_response POST 'repos/o/r/issues/30/comments' '{"id":1}'
+
+  run "${SCRIPT}" failed
+  assert_success
+
+  assert_equal "$(call_count POST repos/o/r/issues)" 0
+  jq --exit-status --arg run "${RUN_URL_FIXTURE}" '.body | contains($run)' \
+    <<< "$(request_json POST repos/o/r/issues/30/comments)"
+}
+
+@test "failed: no open PR for the branch is a no-op" {
+  export HEAD_BRANCH="${BRANCH}" RUN_URL="${RUN_URL_FIXTURE}"
+  stub_open_prs '[]'
+
+  run "${SCRIPT}" failed
+  assert_success
+
+  assert_no_writes
+}
+
+@test "failed: rejects a branch or run URL that is not what GitHub sends" {
+  stub_open_prs "[$(examples_pr 12)]"
+  HEAD_BRANCH='chore/examples-v1; rm' RUN_URL="${RUN_URL_FIXTURE}" run "${SCRIPT}" failed
+  assert_failure 2
+  HEAD_BRANCH="${BRANCH}" RUN_URL='https://evil.example/x' run "${SCRIPT}" failed
+  assert_failure 2
+  assert_no_writes
+}
+
+@test "closed: closes the issue with the outcome" {
+  export PR_NUMBER=12 PR_MERGED=true
+  stub_response GET 'repos/o/r/issues' "[$(failure_issue 30)]"
+  stub_response POST 'repos/o/r/issues/30/comments' '{"id":1}'
+  stub_response PATCH 'repos/o/r/issues/30' '{"number":30}'
+
+  run "${SCRIPT}" closed
+  assert_success
+
+  jq --exit-status '.body | contains("merged")' <<< "$(request_json POST repos/o/r/issues/30/comments)"
+  jq --exit-status '.state == "closed"' <<< "$(request_json PATCH repos/o/r/issues/30)"
+}
+
+@test "closed: a PR closed without merging says so" {
+  export PR_NUMBER=12 PR_MERGED=false
+  stub_response GET 'repos/o/r/issues' "[$(failure_issue 30)]"
+  stub_response POST 'repos/o/r/issues/30/comments' '{"id":1}'
+  stub_response PATCH 'repos/o/r/issues/30' '{"number":30}'
+
+  run "${SCRIPT}" closed
+  assert_success
+
+  jq --exit-status '.body | contains("closed without merging")' <<< "$(request_json POST repos/o/r/issues/30/comments)"
+}
+
+@test "closed: no issue is a no-op" {
+  export PR_NUMBER=12 PR_MERGED=false
+  stub_response GET 'repos/o/r/issues' "[$(failure_issue 31 '.body = "<!-- examples-pr-failure pr=99 -->"')]"
+
+  run "${SCRIPT}" closed
+  assert_success
+
+  assert_no_writes
+}
+
+@test "closed: rejects a malformed PR number or merged flag" {
+  PR_NUMBER='12; x' PR_MERGED=true run "${SCRIPT}" closed
+  assert_failure 2
+  PR_NUMBER=12 PR_MERGED=maybe run "${SCRIPT}" closed
+  assert_failure 2
+}
+
 @test "an unknown or missing subcommand exits 2" {
   run "${SCRIPT}" bogus
   assert_failure 2
