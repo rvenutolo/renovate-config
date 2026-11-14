@@ -2,7 +2,10 @@ name: release-please
 # Keeps one release PR open from the conventional commits on main, and tags
 # vX.Y.Z with a GitHub release when that PR merges. Only feat, fix and breaking
 # changes bump the version; this repo's own chore(deps) updates never cut a
-# release, so consumers are not bumped for tooling churn.
+# release, so consumers are not bumped for tooling churn. After a release it
+# opens an auto-merging PR that points the copyable examples at it, and every
+# other push merges main into that PR while it is behind, since main only
+# accepts up-to-date branches.
 on:
   push:
     branches: [main]
@@ -27,7 +30,7 @@ jobs:
           egress-policy: block
           disable-sudo: true
           allowed-endpoints: >-
-            api.github.com:443
+            api.github.com:443 github.com:443
       - name: Mint a token for the release app
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
@@ -36,12 +39,34 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           # release-please writes the release branch, tags and releases
           # (contents), opens the release PR (pull-requests) and labels it
-          # (issues). Nothing else.
+          # (issues). Nothing else. scripts/examples-pr needs no more: it
+          # writes the examples branch and commit (contents) and opens,
+          # closes, updates and arms auto-merge on the examples PR
+          # (pull-requests).
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: .release-please-config.json
           manifest-file: .release-please-manifest.json
+      # Only the scripts and examples are read; git never pushes, so the
+      # token is not kept in the clone.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+      - name: Open the examples PR for the new release
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+          SHA: ${{ steps.release.outputs.sha }}
+        run: scripts/examples-pr open
+      - name: Bring the examples PR up to date with main
+        if: steps.release.outputs.release_created != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: scripts/examples-pr refresh

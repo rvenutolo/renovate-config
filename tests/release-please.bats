@@ -46,11 +46,58 @@ function yaml_assert() {
       and .[0].with["permission-issues"] == "write"'
 }
 
-@test "release-please workflow: egress blocked except the GitHub API" {
+@test "release-please workflow: egress blocked except the GitHub API and git" {
   yaml_assert "${WORKFLOW}" '[.jobs[].steps[] | select(.uses // "" | startswith("step-security/harden-runner@")) | .with]
     | length == 1
       and .[0]["egress-policy"] == "block"
-      and (.[0]["allowed-endpoints"] | split(" ") | map(select(. != "")) | sort) == ["api.github.com:443"]'
+      and (.[0]["allowed-endpoints"] | split(" ") | map(select(. != "")) | sort) == ["api.github.com:443", "github.com:443"]'
+}
+
+@test "release-please workflow: the release-please step exposes its outputs as release" {
+  yaml_assert "${WORKFLOW}" '[.jobs[].steps[] | select(.uses // "" | startswith("googleapis/release-please-action@"))]
+    | length == 1 and .[0].id == "release"'
+}
+
+# @description Print the position of the only step in the release-please job
+#              that a jq filter selects; fail when not exactly one does.
+# @arg $1 string jq filter, applied to each step, that is true for the wanted
+#      one
+# @stdout the zero-based step index
+function step_index() {
+  local json
+  json="$(yq --output-format=json '.' "${WORKFLOW}")"
+  jq --exit-status --raw-output \
+    "[.jobs[\"release-please\"].steps | to_entries[] | select(.value | $1) | .key]
+     | if length == 1 then .[0] else error(\"expected one matching step, got \\(length)\") end" \
+    <<< "${json}"
+}
+
+@test "release-please workflow: a release opens the examples PR, values only via env" {
+  yaml_assert "${WORKFLOW}" '[.jobs[].steps[] | select(.run // "" | contains("scripts/examples-pr open"))]
+    | length == 1
+      and .[0].if == "steps.release.outputs.release_created == '\''true'\''"
+      and .[0].env == {
+        "GH_TOKEN": "${{ steps.app-token.outputs.token }}",
+        "TAG": "${{ steps.release.outputs.tag_name }}",
+        "SHA": "${{ steps.release.outputs.sha }}"
+      }
+      and (.[0].run | contains("${{") | not)'
+}
+
+@test "release-please workflow: every other push refreshes the examples PR, values only via env" {
+  yaml_assert "${WORKFLOW}" '[.jobs[].steps[] | select(.run // "" | contains("scripts/examples-pr refresh"))]
+    | length == 1
+      and .[0].if == "steps.release.outputs.release_created != '\''true'\''"
+      and .[0].env == {"GH_TOKEN": "${{ steps.app-token.outputs.token }}"}
+      and (.[0].run | contains("${{") | not)'
+}
+
+@test "release-please workflow: the scripts come from a checkout that keeps no credentials" {
+  local checkout open refresh
+  checkout="$(step_index '(.uses // "" | startswith("actions/checkout@")) and .with["persist-credentials"] == false')"
+  open="$(step_index '.run // "" | contains("scripts/examples-pr open")')"
+  refresh="$(step_index '.run // "" | contains("scripts/examples-pr refresh")')"
+  ((checkout < open && checkout < refresh))
 }
 
 @test "release-please workflow: reads the dotfile config and manifest" {

@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+
+# @description Keep the PR that points the copyable examples at the latest
+#              release open, armed and up to date. The PR's branch is
+#              `chore/examples-<tag>` in this repository; a PR from a fork, or
+#              from a branch without that prefix, is never touched.
+#
+#              `open` runs after release-please cut a release. It closes every
+#              other open examples PR and deletes its branch, since a newer
+#              release supersedes it. If this release's PR is already open, it
+#              arms auto-merge on it when that is off and stops, so a re-run
+#              of the release workflow creates nothing twice. Otherwise it
+#              rewrites the examples with scripts/update-examples, points the
+#              branch at the release commit, commits both files there through
+#              the GraphQL `createCommitOnBranch` mutation, so GitHub signs the
+#              commit and the signature rule on `main` holds, opens the PR
+#              against `main`, and enables auto-merge with the merge-commit
+#              method, the only one the repository allows. Examples that
+#              already point at the release need no PR.
+#
+#              `refresh` runs on every other push to `main`. `main` requires
+#              branches to be up to date before they merge, so each examples
+#              PR that is behind `main` gets GitHub's "update a pull request
+#              branch" call, which merges `main` into it in a commit GitHub
+#              signs; CI then reruns and auto-merge proceeds.
+#
+#              Branch names from the API are untrusted: they reach jq only
+#              through --arg or stdin, and reach a URL only after matching the
+#              examples branch pattern.
+# @arg $1 subcommand `open` or `refresh`
+# @env GITHUB_REPOSITORY `owner/repo`, every subcommand
+# @env TAG, SHA the release, for `open`: tag `vMAJOR.MINOR.PATCH` and the full
+#      lowercase 40-character commit SHA it points at
+# @env GH_TOKEN the token gh authenticates with; it must be one whose PRs
+#      trigger CI, so not the workflow token
+# @env EXAMPLES_ROOT optional, for `open`: the directory that holds
+#      `examples/`; default the repository root
+# @stderr a `[<script>] <message>` line per action taken or skipped, gh's own
+#         error output, the usage line; the ERR trap's
+#         `[<script>] ERROR: ...` report when a command fails
+# @exitcode 0 the PR was opened, refreshed or closed, or there was
+#             deliberately nothing to do
+# @exitcode 1 a GitHub API call failed, or scripts/update-examples rejected
+#             the examples
+# @exitcode 2 a missing or unknown subcommand, or a missing or malformed
+#             environment variable
+# @exitcode * otherwise the status of a failing local command
+
+set -Eeuo pipefail
+shopt -s inherit_errexit
+IFS=$'\n\t'
+
+trap 'printf "[%s] ERROR: line %s (exit %s): %s\n" "${0##*/}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
+
+readonly BRANCH_PREFIX='chore/examples-'
+readonly EXIT_ALREADY_PINNED=3
+readonly CONFIG_FILE='examples/renovate.json5'
+readonly CALLER_FILE='examples/renovate-failure-issue.yml'
+# jq: the open PRs that are examples PRs of this repository. head.repo is null
+# when the head repository was deleted, which compares unequal to $repo.
+# shellcheck disable=SC2016
+readonly EXAMPLES_PRS='[.[] | select(((.head.ref // "") | startswith($prefix)) and .head.repo.full_name == $repo)]'
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+
+# @description Log one line to stderr.
+# @arg $1 message the text to log
+# @stderr the `[<script>] <message>` line
+function log() {
+  printf '[%s] %s\n' "${0##*/}" "$1" >&2
+}
+
+# @description Report a usage problem and exit 2.
+# @arg $1 message what is wrong
+# @stderr the message and the usage line
+# @exitcode 2 always
+function usage_error() {
+  log "$1"
+  printf 'usage: %s open|refresh (configured through the environment)\n' "${0##*/}" >&2
+  exit 2
+}
+
+# @description Report a failed API call and exit 1. Inside a command
+#              substitution this exits only the subshell, and errexit then
+#              carries the 1 out of the caller.
+# @arg $1 message what failed
+# @exitcode 1 always
+function api_error() {
+  log "$1"
+  exit 1
+}
+
+# @description Fail with exit 2 unless every named variable is set and
+#              non-empty.
+# @arg $@ names the environment variable names
+# @exitcode 2 a variable is missing
+function require_env() {
+  local name
+  for name in "$@"; do
+    if [[ -z "${!name:-}" ]]; then
+      usage_error "missing required env: ${name}"
+    fi
+  done
+}
+
+# @description Fail with exit 2 unless a variable's value matches a pattern.
+# @arg $1 name the variable name
+# @arg $2 regex the extended regex the whole value must match
+# @arg $3 expected a description of the valid values, for the message
+# @exitcode 2 the value does not match
+function require_format() {
+  local -r name="$1" regex="$2" expected="$3"
+  if [[ ! "${!name}" =~ ${regex} ]]; then
+    usage_error "invalid ${name}: expected ${expected}"
+  fi
+}
+
+# @description Run `gh api`, turning any failure into exit 1.
+# @arg $@ args the `gh api` arguments
+# @stdout the response
+# @exitcode 1 the call failed
+function gh_api() {
+  gh api "$@" || api_error "gh api ${*} failed"
+}
+
+# @description Print this repository's open examples PRs.
+# @stdout compact JSON array of `{number, node_id, ref, sha, auto_merge}`
+function examples_prs() {
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+    | jq --slurp --compact-output --arg prefix "${BRANCH_PREFIX}" --arg repo "${GITHUB_REPOSITORY}" \
+      "add // [] | ${EXAMPLES_PRS} | map({number, node_id, ref: .head.ref, sha: .head.sha, auto_merge})"
+}
+
+# @description Whether a branch name is safe to put in an API path: an
+#              examples branch made only of characters a tag name uses.
+# @arg $1 ref the branch name
+# @exitcode 0 the name is safe
+# @exitcode 1 it is not
+function safe_branch() {
+  [[ "$1" =~ ^chore/examples-[A-Za-z0-9._-]+$ && "$1" != *..* ]]
+}
+
+# @description Close one superseded examples PR and delete its branch.
+# @arg $1 number the PR number
+# @arg $2 ref the PR's head branch
+function close_superseded() {
+  local -r number="$1" ref="$2"
+  if ! safe_branch "${ref}"; then
+    log "skipping PR #${number}: unexpected branch name"
+    return 0
+  fi
+  jq --null-input '{state: "closed"}' \
+    | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/pulls/${number}" --input - > /dev/null
+  gh_api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${ref}" > /dev/null
+  log "closed superseded PR #${number} and deleted ${ref}"
+}
+
+# @description Enable auto-merge with the merge-commit method on a PR.
+# @arg $1 node_id the PR's GraphQL node ID
+function arm_auto_merge() {
+  local -r node_id="$1"
+  # shellcheck disable=SC2016
+  jq --null-input --arg id "${node_id}" '{
+      query: "mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) { pullRequest { number } } }",
+      variables: {pullRequestId: $id, mergeMethod: "MERGE"}
+    }' \
+    | gh_api --method POST graphql --input - > /dev/null
+}
+
+# @description Point the examples branch at the release commit: create it, or
+#              force it back there when a failed earlier run left it behind
+#              without a PR.
+# @arg $1 branch the branch name
+function reset_branch() {
+  local -r branch="$1"
+  local err
+  # stderr is captured to tell a 404 from other failures; stdout, the ref or
+  # gh's echo of the error body, is discarded.
+  # shellcheck disable=SC2069
+  if err="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" 2>&1 > /dev/null)"; then
+    jq --null-input --arg sha "${SHA}" '{sha: $sha, force: true}' \
+      | gh_api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" --input - > /dev/null
+    log "reset leftover ${branch} to ${SHA}"
+    return 0
+  fi
+  if [[ "${err}" != *'(HTTP 404)'* ]]; then
+    printf '%s\n' "${err}" >&2
+    api_error "looking up ${branch} failed"
+  fi
+  jq --null-input --arg ref "refs/heads/${branch}" --arg sha "${SHA}" '{ref: $ref, sha: $sha}' \
+    | gh_api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" --input - > /dev/null
+  log "created ${branch} at ${SHA}"
+}
+
+# @description Commit both example files, as they are under the root, to the
+#              branch on top of the release commit.
+# @arg $1 branch the branch name
+# @arg $2 headline the commit headline
+# @arg $3 root the directory that holds `examples/`
+function commit_examples() {
+  local -r branch="$1" headline="$2" root="$3"
+  local config caller
+  config="$(base64 --wrap=0 "${root}/${CONFIG_FILE}")"
+  caller="$(base64 --wrap=0 "${root}/${CALLER_FILE}")"
+  # shellcheck disable=SC2016
+  jq --null-input --arg repo "${GITHUB_REPOSITORY}" --arg branch "${branch}" \
+    --arg headline "${headline}" --arg sha "${SHA}" \
+    --arg config_path "${CONFIG_FILE}" --arg config "${config}" \
+    --arg caller_path "${CALLER_FILE}" --arg caller "${caller}" '{
+      query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+      variables: {input: {
+        branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+        message: {headline: $headline},
+        expectedHeadOid: $sha,
+        fileChanges: {additions: [
+          {path: $config_path, contents: $config},
+          {path: $caller_path, contents: $caller}
+        ]}
+      }}
+    }' \
+    | gh_api --method POST graphql --input - > /dev/null
+  log "committed the examples to ${branch}"
+}
+
+# @description Open this release's examples PR with auto-merge, after closing
+#              the PRs it supersedes.
+function open_cmd() {
+  require_env TAG SHA
+  require_format TAG '^v[0-9]+\.[0-9]+\.[0-9]+$' 'vMAJOR.MINOR.PATCH'
+  require_format SHA '^[0-9a-f]{40}$' 'a full lowercase 40-character commit SHA'
+  local -r branch="${BRANCH_PREFIX}${TAG}"
+  local -r headline="chore: point examples at ${TAG}"
+  local root
+  root="${EXAMPLES_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}"
+  readonly root
+
+  local prs
+  prs="$(examples_prs)"
+  local number ref
+  while IFS=$'\t' read -r number ref; do
+    close_superseded "${number}" "${ref}"
+  done < <(jq --raw-output --arg branch "${branch}" '.[] | select(.ref != $branch) | [.number, .ref] | @tsv' <<< "${prs}")
+
+  local existing
+  existing="$(jq --compact-output --arg branch "${branch}" 'map(select(.ref == $branch)) | first // empty' <<< "${prs}")"
+  if [[ -n "${existing}" ]]; then
+    number="$(jq --raw-output '.number' <<< "${existing}")"
+    if jq --exit-status '.auto_merge == null' <<< "${existing}" > /dev/null; then
+      arm_auto_merge "$(jq --raw-output '.node_id' <<< "${existing}")"
+      log "PR #${number} for ${TAG} is already open; armed its auto-merge"
+    else
+      log "PR #${number} for ${TAG} is already open; nothing to do"
+    fi
+    return 0
+  fi
+
+  local status=0
+  "${SCRIPT_DIR}/update-examples" "${TAG}" "${SHA}" "${root}" || status=$?
+  if ((status == EXIT_ALREADY_PINNED)); then
+    log "the examples already point at ${TAG}; no PR needed"
+    return 0
+  fi
+  if ((status != 0)); then
+    log "update-examples failed (exit ${status})"
+    exit 1
+  fi
+
+  reset_branch "${branch}"
+  commit_examples "${branch}" "${headline}" "${root}"
+
+  local pr
+  pr="$(jq --null-input --arg title "${headline}" --arg head "${branch}" --arg tag "${TAG}" '{
+      title: $title, head: $head, base: "main",
+      body: "Opened by the release workflow after \($tag) was released: it points the copyable examples at that release. It merges by itself once CI passes."
+    }' \
+    | gh_api --method POST "repos/${GITHUB_REPOSITORY}/pulls" --input -)"
+  number="$(jq --raw-output '.number' <<< "${pr}")"
+  log "opened PR #${number}"
+
+  arm_auto_merge "$(jq --raw-output '.node_id' <<< "${pr}")"
+  log "armed auto-merge on PR #${number}"
+}
+
+# @description Merge `main` into every examples PR that is behind it.
+function refresh_cmd() {
+  local prs
+  prs="$(examples_prs)"
+  if [[ "$(jq 'length' <<< "${prs}")" == 0 ]]; then
+    log 'no open examples PR'
+    return 0
+  fi
+  local number sha behind
+  while IFS=$'\t' read -r number sha; do
+    if [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+      log "skipping PR #${number}: unexpected head SHA"
+      continue
+    fi
+    behind="$(gh_api "repos/${GITHUB_REPOSITORY}/compare/main...${sha}" | jq --raw-output '.behind_by')"
+    [[ "${behind}" =~ ^[0-9]+$ ]] || api_error "comparing PR #${number} with main returned no behind_by"
+    if ((behind == 0)); then
+      log "PR #${number} is up to date with main"
+      continue
+    fi
+    jq --null-input --arg sha "${sha}" '{expected_head_sha: $sha}' \
+      | gh_api --method PUT "repos/${GITHUB_REPOSITORY}/pulls/${number}/update-branch" --input - > /dev/null
+    log "PR #${number} was ${behind} behind main; merged main into it"
+  done < <(jq --raw-output '.[] | [.number, .sha] | @tsv' <<< "${prs}")
+}
+
+function main() {
+  local -r subcommand="${1:-}"
+  case "${subcommand}" in
+    open | refresh) ;;
+    *) usage_error "unknown subcommand: ${subcommand:-<none>}" ;;
+  esac
+  if (($# > 1)); then
+    usage_error 'too many arguments'
+  fi
+  require_env GITHUB_REPOSITORY
+  require_format GITHUB_REPOSITORY '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' 'owner/repo'
+
+  "${subcommand}_cmd"
+}
+
+main "$@"
