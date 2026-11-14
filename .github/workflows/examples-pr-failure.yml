@@ -36,7 +36,10 @@ jobs:
       issues: write  # create or comment on the failure issue; create its label
       pull-requests: read  # find the PR for the failed branch
     # One run per branch at a time, so two failures of the same PR cannot file
-    # duplicate issues. cancel-in-progress: false lets a running run finish.
+    # duplicate issues. cancel-in-progress: false lets a running run finish, but
+    # a group holds one pending run and a newer pending run replaces an older
+    # one, so with several quick failures an intermediate comment can be
+    # dropped; the issue still exists once.
     concurrency:
       group: examples-pr-failure-${{ github.event.workflow_run.head_branch }}
       cancel-in-progress: false
@@ -72,7 +75,6 @@ jobs:
     permissions:
       contents: read  # check out the script
       issues: write  # record the outcome in the failure issue and close it
-      pull-requests: read  # read the closed PR's details
     # A group per PR, because a group holds one pending run and a newer one
     # replaces it: only a second close of the same PR can replace a pending
     # close, and it does the same work.

@@ -388,7 +388,9 @@ function ensure_failure_label() {
   api_error "creating label ${FAILURE_LABEL} failed"
 }
 
-# @description Print the number of the oldest open failure issue whose body
+# @description Print the number of the oldest open failure issue, opened by the
+#              workflow token (`github-actions[bot]`) so a hand-written issue
+#              with the marker is ignored, whose body
 #              starts with the marker line for a PR, or nothing.
 # @arg $1 pr the PR number
 # @stdout the issue number, or nothing
@@ -396,7 +398,7 @@ function find_failure_issue() {
   local -r pr="$1"
   gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=${FAILURE_LABEL}&state=open&per_page=100" \
     | jq --slurp --raw-output --arg marker "<!-- examples-pr-failure pr=${pr} -->" '
-      [add // [] | .[] | select(.pull_request == null)
+      [add // [] | .[] | select(.pull_request == null and .user.login == "github-actions[bot]")
         | select(((.body // "") | split("\n")[0] | sub("\r$"; "")) == $marker) | .number]
       | min // empty'
 }

@@ -259,11 +259,13 @@ function caller_if() {
     and contains("github.event.pull_request.head.repo.full_name == github.repository")'
 }
 
-@test "examples-pr-failure workflow: each job grants only issues write, pull-requests read and contents read" {
+@test "examples-pr-failure workflow: jobs grant only what their script calls need" {
   # contents: read is for the checkout of the script; a job-level grant
-  # replaces the default, so a private repository needs it named.
-  yaml_assert "${EXAMPLES_FAILURE}" '.jobs | length == 2 and all(.[];
-    .permissions == {"issues": "write", "pull-requests": "read", "contents": "read"})'
+  # replaces the default, so a private repository needs it named. Only
+  # failed reads PRs; closed works on issues alone.
+  yaml_assert "${EXAMPLES_FAILURE}" '(.jobs | length) == 2
+    and .jobs.failed.permissions == {"issues": "write", "pull-requests": "read", "contents": "read"}
+    and .jobs.closed.permissions == {"issues": "write", "contents": "read"}'
 }
 
 @test "examples-pr-failure workflow: no step checks out a PR ref" {

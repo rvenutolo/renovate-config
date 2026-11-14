@@ -404,7 +404,7 @@ function stub_label() {
 function failure_issue() {
   local -r number="$1" overrides="${2:-.}"
   jq --null-input --compact-output --argjson number "${number}" \
-    "{number: \$number, state: \"open\",
+    "{number: \$number, state: \"open\", user: {login: \"github-actions[bot]\"},
       body: \"<!-- examples-pr-failure pr=12 -->\\nPR link\"} | ${overrides}"
 }
 
@@ -471,10 +471,12 @@ readonly RUN_URL_FIXTURE='https://github.com/o/r/actions/runs/555'
 
 @test "failed: rejects a branch or run URL that is not what GitHub sends" {
   stub_open_prs "[$(examples_pr 12)]"
-  HEAD_BRANCH='chore/examples-v1; rm' RUN_URL="${RUN_URL_FIXTURE}" run "${SCRIPT}" failed
+  HEAD_BRANCH='chore/examples-v1; echo PAYLOAD_RAN' RUN_URL="${RUN_URL_FIXTURE}" run "${SCRIPT}" failed
   assert_failure 2
+  assert_output --partial "invalid HEAD_BRANCH"
   HEAD_BRANCH="${BRANCH}" RUN_URL='https://evil.example/x' run "${SCRIPT}" failed
   assert_failure 2
+  assert_output --partial "invalid RUN_URL"
   assert_no_writes
 }
 
@@ -514,10 +516,36 @@ readonly RUN_URL_FIXTURE='https://github.com/o/r/actions/runs/555'
 }
 
 @test "closed: rejects a malformed PR number or merged flag" {
-  PR_NUMBER='12; x' PR_MERGED=true run "${SCRIPT}" closed
+  PR_NUMBER='12; echo PAYLOAD_RAN' PR_MERGED=true run "${SCRIPT}" closed
   assert_failure 2
+  assert_output --partial 'invalid PR_NUMBER'
   PR_NUMBER=12 PR_MERGED=maybe run "${SCRIPT}" closed
   assert_failure 2
+  assert_output --partial 'invalid PR_MERGED'
+}
+
+@test "failed: an issue with the marker from another author is not commented on" {
+  export HEAD_BRANCH="${BRANCH}" RUN_URL="${RUN_URL_FIXTURE}"
+  stub_open_prs "[$(examples_pr 12)]"
+  stub_label
+  stub_response GET 'repos/o/r/issues' "[$(failure_issue 30 '.user.login = "someone"')]"
+  stub_response POST 'repos/o/r/issues' '{"number":31}'
+
+  run "${SCRIPT}" failed
+  assert_success
+
+  assert_equal "$(call_count POST repos/o/r/issues/30/comments)" 0
+  assert_equal "$(call_count POST repos/o/r/issues)" 1
+}
+
+@test "closed: an issue with the marker from another author is left alone" {
+  export PR_NUMBER=12 PR_MERGED=true
+  stub_response GET 'repos/o/r/issues' "[$(failure_issue 30 '.user.login = "someone"')]"
+
+  run "${SCRIPT}" closed
+  assert_success
+
+  assert_no_writes
 }
 
 @test "an unknown or missing subcommand exits 2" {
