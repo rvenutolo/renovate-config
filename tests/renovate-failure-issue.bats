@@ -1412,6 +1412,64 @@ function first_render() {
   [[ "${logs}" != *'<'* ]] || fail "markup reached the log link: ${logs}"
 }
 
+@test "problems: the Dashboard and problems issues come from narrowed listings" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  run grep '^CALL GET repos/o/r/issues?' "${GH_STUB_DIR}/calls.log"
+  assert_line 'CALL GET repos/o/r/issues?state=open&creator=renovate%5Bbot%5D&per_page=100'
+  assert_line 'CALL GET repos/o/r/issues?state=all&labels=renovate-failure&per_page=100'
+  refute_line 'CALL GET repos/o/r/issues?state=all&per_page=100'
+}
+
+@test "problems: the log link is the Dashboard's View logs link" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  run "${SCRIPT}" problems
+  assert_success
+  run grep --fixed-strings '**Renovate logs:**' <<< "$(request_body POST repos/o/r/issues)"
+  assert_output '**Renovate logs:** https://developer.mend.io//github/o/r'
+}
+
+@test "problems: a Dashboard without a View logs link gets no log link" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  printf '%s\n' '[portal](https://developer.mend.io/github/o/r)' '' '## Repository Problems' '' 'header' '' \
+    ' - ⚠️ WARN: Error updating flake.lock' > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  [[ "$(request_body POST repos/o/r/issues)" != *'Renovate logs'* ]] || fail 'a non-log link was labeled as the logs'
+}
+
+@test "problems: missing time zone data is an error, not a silent UTC window" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  stub_problems "${FIXTURES}/hosted-problems.txt"
+  mkdir --parents "${BATS_TEST_TMPDIR}/no-zoneinfo"
+  TZDIR="${BATS_TEST_TMPDIR}/no-zoneinfo" run "${SCRIPT}" problems
+  assert_failure 1
+  assert_output --partial 'time zone data for America/New_York'
+  assert_no_issue_writes
+}
+
+@test "problems: a lookup warning cannot break out of the fence or mention anyone" {
+  export PROBLEMS_NOW="${IN_WINDOW}"
+  printf '%s\n' '---' '' '> ⚠️ **Warning**' '> ' \
+    '> Renovate failed to look up the following dependencies: `x` ``` @someone.' \
+    '> ' '> Files affected: `flake.nix`' '' '---' > "${BATS_TEST_TMPDIR}/dashboard.md"
+  stub_problems "${BATS_TEST_TMPDIR}/dashboard.md"
+  run "${SCRIPT}" problems
+  assert_success
+  local body outside
+  body="$(request_body POST repos/o/r/issues)"
+  [[ "${body}" == *'@someone'* ]] || fail 'the lookup warning was not copied'
+  outside="$(awk '
+    !inside && /^````+text$/ { inside = 1; fence = substr($0, 1, length($0) - 4); next }
+    inside && $0 == fence { inside = 0; next }
+    !inside { print }' <<< "${body}")"
+  [[ "${outside}" != *'@someone'* ]] || fail 'a mention escaped the fenced block'
+}
+
 @test "usage: unknown subcommand exits 2" {
   run "${SCRIPT}" reopen
   assert_failure 2
