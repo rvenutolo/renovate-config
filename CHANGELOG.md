@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/rvenutolo/renovate-config/compare/v1.2.0...v1.2.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* wrap the example caller's sweep and problems if: lines ([c16725f](https://github.com/rvenutolo/renovate-config/commit/c16725fb983021080a941e0c5f29c8b73ee5e560))
+* wrap the example caller's sweep and problems if: lines ([#17](https://github.com/rvenutolo/renovate-config/issues/17)) ([8176a5d](https://github.com/rvenutolo/renovate-config/commit/8176a5d649c6974607d6f8497d952bbb1f3f89f3))
+
 ## [1.2.0](https://github.com/rvenutolo/renovate-config/compare/v1.1.0...v1.2.0) (2026-11-14)
 
 
