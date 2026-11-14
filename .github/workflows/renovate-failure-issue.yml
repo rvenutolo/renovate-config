@@ -7,7 +7,7 @@ on:
     inputs:
       mode:
         description: '`open` after a failed CI run on a Renovate branch, `close` when a Renovate PR closes, `sweep` on the
-          weekly schedule'
+          Monday schedule, `problems` on the Sunday schedule'
         type: string
         required: true
       run-id:

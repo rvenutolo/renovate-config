@@ -87,11 +87,11 @@ function caller_if() {
       and .[0].env.GH_TOKEN == "${{ github.token }}"'
 }
 
-@test "caller example: triggers on ci completion, PR close, a weekly schedule and manual dispatch" {
+@test "caller example: triggers on ci completion, PR close, two weekly schedules and manual dispatch" {
   yaml_assert "${CALLER}" '.on.workflow_run.workflows == ["ci"]
     and .on.workflow_run.types == ["completed"]
     and .on.pull_request_target.types == ["closed"]
-    and .on.schedule == [{"cron":"17 14 * * 1"}]
+    and .on.schedule == [{"cron":"17 14 * * 1"},{"cron":"47 21 * * 0"}]
     and (.on | has("workflow_dispatch"))'
 }
 
@@ -111,11 +111,23 @@ function caller_if() {
   yaml_assert "${CALLER}" '.jobs.sweep.permissions == {"issues":"write","pull-requests":"read","checks":"read","statuses":"read"}'
 }
 
-@test "caller example: sweep runs only on schedule or manual dispatch" {
-  local expr
-  expr="$(caller_if sweep)"
-  assert_regex "${expr}" "github\.event_name == 'schedule'"
-  assert_regex "${expr}" "github\.event_name == 'workflow_dispatch'"
+@test "caller example: sweep and problems each run only on their own cron or manual dispatch" {
+  local job cron expr
+  for job in 'sweep:17 14 \* \* 1' 'problems:47 21 \* \* 0'; do
+    cron="${job#*:}" job="${job%%:*}"
+    expr="$(caller_if "${job}")"
+    assert_regex "${expr}" "github\.event_name == 'schedule' && github\.event\.schedule == '${cron}'"
+    assert_regex "${expr}" "github\.event_name == 'workflow_dispatch'"
+  done
+}
+
+@test "caller example: problems job grants exactly issues write" {
+  yaml_assert "${CALLER}" '.jobs.problems.permissions == {"issues":"write"}'
+}
+
+@test "caller example: problems job has its own non-cancelling concurrency group" {
+  yaml_assert "${CALLER}" '.jobs.problems.concurrency.group == "renovate-failure-issue-problems"
+    and .jobs.problems.concurrency["cancel-in-progress"] == false'
 }
 
 @test "caller example: sweep job has its own non-cancelling concurrency group" {
@@ -144,8 +156,8 @@ function caller_if() {
 
 @test "caller example: each job calls the reusable workflow in its own mode" {
   yaml_assert "${CALLER}" '.jobs.open.with.mode == "open" and .jobs.close.with.mode == "close"
-    and .jobs.sweep.with.mode == "sweep"
-    and ([.jobs[].uses] | length == 3 and all(startswith("rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@")))'
+    and .jobs.sweep.with.mode == "sweep" and .jobs.problems.with.mode == "problems"
+    and ([.jobs[].uses] | length == 4 and all(startswith("rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@")))'
 }
 
 @test "caller example: no workflow-level concurrency" {
@@ -166,7 +178,7 @@ function caller_if() {
     '^[[:space:]]+uses: rvenutolo/renovate-config/\.github/workflows/renovate-failure-issue\.yml@[0-9a-f]{40}  # v[0-9]+\.[0-9]+\.[0-9]+$' \
     "${CALLER}"
   assert_success
-  assert_output '3'
+  assert_output '4'
 }
 
 @test "renovate.json5 example: extends the tag-pinned preset" {
@@ -191,6 +203,6 @@ function caller_if() {
   local uses_lines exempt_lines
   uses_lines="$(grep --count --extended-regexp -- "${pinned}" "${CALLER}")"
   exempt_lines="$(grep --before-context=1 --extended-regexp -- "${pinned}" "${CALLER}" | grep --count --extended-regexp -- "${exempt}" || true)"
-  [[ "${uses_lines}" -eq 3 ]]
+  [[ "${uses_lines}" -eq 4 ]]
   [[ "${exempt_lines}" -eq "${uses_lines}" ]]
 }
