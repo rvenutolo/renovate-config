@@ -190,13 +190,33 @@ function caller_if() {
   assert_success
 }
 
-@test "own config: Renovate watches examples/" {
+@test "own config: Renovate does not target examples/" {
+  # update-examples repoints the examples at each release, so no manager may
+  # also try to bump them.
   local json
   json="$(pyjson5 --as-json "${OWN_CONFIG}")"
-  jq --exit-status '
-    (.["renovate-config"].managerFilePatterns | index("/^examples/renovate\\.json5$/") != null)
-    and (.["github-actions"].managerFilePatterns | index("/^examples/.+\\.ya?ml$/") != null)' \
+  jq --exit-status '[.. | strings | select(contains("examples"))] | length == 0' \
     <<< "${json}" > /dev/null
+}
+
+@test "examples: copyable as-is" {
+  [[ "$(head --lines=1 "${CALLER}")" == 'name: renovate-failure-issue' ]]
+  run grep --ignore-case --extended-regexp 'placeholder|v0\.0\.0' "${EXAMPLE_CONFIG}"
+  assert_failure 1
+  run grep --extended-regexp '0{40}' "${CALLER}" "${EXAMPLE_CONFIG}"
+  assert_failure 1
+}
+
+@test "examples: both files pin the same release" {
+  local tag
+  tag="$(grep --only-matching --extended-regexp 'renovate-config#v[0-9]+\.[0-9]+\.[0-9]+' "${EXAMPLE_CONFIG}" | sed 's/.*#//')"
+  [[ -n "${tag}" ]]
+  local -r pin='renovate-failure-issue\.yml@[0-9a-f]{40}  # v[0-9]+\.[0-9]+\.[0-9]+$'
+  local comments shas
+  comments="$(grep --extended-regexp "${pin}" "${CALLER}" | sed 's/.*# //' | sort --unique)"
+  shas="$(grep --extended-regexp "${pin}" "${CALLER}" | sed --regexp-extended 's/.*@([0-9a-f]{40}).*/\1/' | sort --unique)"
+  [[ "${comments}" == "${tag}" ]]
+  [[ "$(wc --lines <<< "${shas}")" == 1 ]]
 }
 
 @test "caller example: each pinned uses: line is exempt from yamllint line-length" {
