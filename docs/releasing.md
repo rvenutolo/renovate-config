@@ -38,9 +38,11 @@ Renovate does not touch them in this repository; a release does, through a PR.
   The PR is opened by the app so CI runs on it. Any older examples PR still open
   is closed and its branch deleted, since the new release supersedes it.
 - **Retried by hand.** Re-running the release workflow does not retry the
-  examples PR. Run the `release-please` workflow by hand with the tag
-  (`gh workflow run release-please.yml -f tag=vX.Y.Z`) to open it or re-arm its
-  auto-merge; an examples PR already open is not created twice.
+  examples PR. Run the `release-please` workflow by hand with the latest
+  release's tag (`gh workflow run release-please.yml -f tag=vX.Y.Z`) to open it
+  or re-arm its auto-merge; an examples PR already open is not created twice.
+  Any other tag stops the run before it changes anything, since `open` closes
+  every other examples PR as superseded.
 - **Kept up to date.** `main` requires branches to be up to date, so on every
   run, after `open` when that runs, the same workflow runs
   `scripts/examples-pr refresh`, which merges `main` into an examples PR that

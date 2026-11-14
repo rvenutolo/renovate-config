@@ -346,6 +346,7 @@ function committed_file() {
 
 @test "open: with no SHA, resolves the tag to its commit and releases from it" {
   SHA=''
+  stub_response GET 'repos/o/r/releases/latest' '{"tag_name":"v9.8.7"}'
   stub_response GET 'repos/o/r/commits/v9.8.7' "{\"sha\":\"${RELEASE_SHA}\"}"
   stub_open_prs '[]'
   stub_open_writes
@@ -367,6 +368,7 @@ function committed_file() {
 
 @test "open: with no SHA, a tag that does not exist exits 1 before any write" {
   SHA=''
+  stub_response GET 'repos/o/r/releases/latest' '{"tag_name":"v9.8.7"}'
   stub_open_prs '[]'
   stub_open_writes
   local before
@@ -380,8 +382,49 @@ function committed_file() {
   assert_equal "$(cat "${EXAMPLES_ROOT}/examples/"*)" "${before}"
 }
 
+@test "open: with no SHA, a tag older than the latest release exits 1 before any write" {
+  # A retry by hand with an older tag would otherwise close the newer
+  # release's examples PR and point the examples back at the older release.
+  SHA=''
+  stub_response GET 'repos/o/r/releases/latest' '{"tag_name":"v9.9.0"}'
+  stub_response GET 'repos/o/r/commits/v9.8.7' "{\"sha\":\"${RELEASE_SHA}\"}"
+  stub_open_prs '[]'
+  stub_open_writes
+  local before
+  before="$(cat "${EXAMPLES_ROOT}/examples/"*)"
+
+  run "${SCRIPT}" open
+  assert_failure 1
+  assert_output --partial 'v9.8.7 is not the latest release (v9.9.0)'
+
+  assert_no_writes
+  assert_equal "$(cat "${EXAMPLES_ROOT}/examples/"*)" "${before}"
+}
+
+@test "open: with no SHA, a failing latest-release lookup exits 1 before any write" {
+  SHA=''
+  stub_open_prs '[]'
+  stub_open_writes
+
+  run "${SCRIPT}" open
+  assert_failure 1
+
+  assert_no_writes
+}
+
+@test "open: with a SHA from release-please, the latest release is not consulted" {
+  stub_open_prs '[]'
+  stub_open_writes
+
+  run "${SCRIPT}" open
+  assert_success
+
+  assert_equal "$(call_count GET 'repos/o/r/releases/latest')" 0
+}
+
 @test "open: with no SHA, a malformed commit SHA from the API exits 1 before any write" {
   SHA=''
+  stub_response GET 'repos/o/r/releases/latest' '{"tag_name":"v9.8.7"}'
   stub_response GET 'repos/o/r/commits/v9.8.7' '{"sha":"0123"}'
   stub_open_prs '[]'
   stub_open_writes
