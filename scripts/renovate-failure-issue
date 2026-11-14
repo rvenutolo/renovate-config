@@ -605,19 +605,30 @@ function write_stuck_issue() {
   fi
 }
 
-# @description Print every issue in this repository, open or closed. One
-#              listing serves both the Dashboard lookup and the problems issue
-#              lookup; both filter it themselves.
+# @description Print the open issues Renovate opened: where the Dependency
+#              Dashboard lives. find_dashboard still checks author and title
+#              itself.
 # @stdout compact JSON array of issues
-function issues_all() {
-  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=all&per_page=100" > "${WORK_DIR}/issues-all.raw"
-  jq --slurp --compact-output 'add // []' "${WORK_DIR}/issues-all.raw"
+function renovate_open_issues() {
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=open&creator=renovate%5Bbot%5D&per_page=100" \
+    > "${WORK_DIR}/renovate-issues.raw"
+  jq --slurp --compact-output 'add // []' "${WORK_DIR}/renovate-issues.raw"
+}
+
+# @description Print every issue labeled FAILURE_LABEL, open or closed: where
+#              the problems issues live. problem_issues still checks the
+#              marker itself.
+# @stdout compact JSON array of issues
+function labeled_issues() {
+  gh_api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=all&labels=${FAILURE_LABEL}&per_page=100" \
+    > "${WORK_DIR}/labeled-issues.raw"
+  jq --slurp --compact-output 'add // []' "${WORK_DIR}/labeled-issues.raw"
 }
 
 # @description Print Renovate's Dependency Dashboard: the oldest open issue,
 #              not a pull request, authored by `renovate[bot]` and titled
 #              `Dependency Dashboard`.
-# @stdin the issues listing from issues_all
+# @stdin the issues listing from renovate_open_issues
 # @stdout compact JSON `{number, html_url, body}`, or nothing
 function find_dashboard() {
   jq --compact-output '
@@ -668,15 +679,16 @@ function problems_fingerprint() {
   LC_ALL=C sort --unique | sha256sum | cut --characters=1-16
 }
 
-# @description Print the Mend log link from a Dashboard body, if it has one
-#              on developer.mend.io; a link to any other host is dropped, and
-#              the link stops at the first character outside a plain URL path,
-#              so no markup after it reaches the issue.
+# @description Print the target of the Dashboard's "View logs" link, if it
+#              points at developer.mend.io; any other host is dropped, and the
+#              path is limited to plain URL characters, so no markup reaches
+#              the issue.
 # @stdin the Dashboard body
 # @stdout the URL, or nothing
 function mend_log_url() {
   jq --raw-input --slurp --raw-output '
-    [match("https://developer\\.mend\\.io/[A-Za-z0-9/_.~%-]*"; "g").string][0] // empty'
+    [match("\\[View logs\\]\\((https://developer\\.mend\\.io/[A-Za-z0-9/_.~%-]*)\\)"; "g")
+      | .captures[0].string][0] // empty'
 }
 
 # @description Render the problems issue body. The problem lines go inside a
@@ -715,7 +727,7 @@ function render_problems_body() {
 
 # @description Print every problems issue, open or closed: those whose
 #              body starts with the `renovate-problems` marker.
-# @stdin the issues listing from issues_all
+# @stdin the issues listing from labeled_issues
 # @stdout compact JSON array of
 #         `{number, state, fingerprint, resolved, closed_at, body}`
 function problem_issues() {
@@ -735,12 +747,18 @@ function problem_issues() {
 #              update.
 # @arg $1 epoch the time, in seconds since the epoch
 # @exitcode 0 inside the window
-# @exitcode 1 outside it
+# @exitcode 1 outside it; or, after logging, the runner has no time zone data
+#             for America/New_York, which would silently turn the window into
+#             one in UTC (this exits the script)
 function in_problems_window() {
   local -r epoch="$1"
   local stamp
-  stamp="$(TZ=America/New_York date --date="@${epoch}" '+%u %H%M')"
-  local -ri weekday="${stamp% *}" clock="10#${stamp#* }"
+  stamp="$(TZ=America/New_York date --date="@${epoch}" '+%Z %u %H%M')"
+  if [[ ! "${stamp}" =~ ^(EST|EDT)\ ([1-7])\ ([0-9]{4})$ ]]; then
+    log 'time zone data for America/New_York is missing on this runner'
+    exit 1
+  fi
+  local -ri weekday="${BASH_REMATCH[2]}" clock="10#${BASH_REMATCH[3]}"
   ((weekday == 6 && clock >= 1800)) || ((weekday == 7 && clock < 1800))
 }
 
@@ -766,18 +784,19 @@ function problems_cmd() {
     in_window=true
   fi
 
-  issues_all > "${WORK_DIR}/issues-all.json"
-  problem_issues < "${WORK_DIR}/issues-all.json" > "${WORK_DIR}/problem-issues.json"
+  labeled_issues > "${WORK_DIR}/labeled-issues.json"
+  problem_issues < "${WORK_DIR}/labeled-issues.json" > "${WORK_DIR}/problem-issues.json"
   jq --compact-output 'map(select(.state == "open")) | sort_by(.number) | .[]' \
     "${WORK_DIR}/problem-issues.json" > "${WORK_DIR}/open-problems.jsonl"
-  local -a open_issues
-  mapfile -t open_issues < "${WORK_DIR}/open-problems.jsonl"
+  local -a open_problem_issues
+  mapfile -t open_problem_issues < "${WORK_DIR}/open-problems.jsonl"
   local issue
 
-  find_dashboard < "${WORK_DIR}/issues-all.json" > "${WORK_DIR}/dashboard.json"
+  renovate_open_issues > "${WORK_DIR}/renovate-issues.json"
+  find_dashboard < "${WORK_DIR}/renovate-issues.json" > "${WORK_DIR}/dashboard.json"
   if [[ ! -s "${WORK_DIR}/dashboard.json" ]]; then
     log 'no Dependency Dashboard'
-    for issue in "${open_issues[@]}"; do
+    for issue in "${open_problem_issues[@]}"; do
       finish_issue "${issue}" 'repository problems' 'Dependency Dashboard not found' 'not_planned' ' resolved=1'
     done
     return 0
@@ -790,7 +809,7 @@ function problems_cmd() {
       log 'no problems listed, but outside the window; leaving any problems issue alone'
       return 0
     fi
-    for issue in "${open_issues[@]}"; do
+    for issue in "${open_problem_issues[@]}"; do
       finish_issue "${issue}" 'repository problems' 'Renovate no longer reports problems' 'completed' ' resolved=1'
     done
     log 'the Dependency Dashboard reports no problems'
@@ -806,25 +825,25 @@ function problems_cmd() {
      dashboard_url: $dashboard[0].html_url}' \
     | render_problems_body > "${WORK_DIR}/problems-body.md"
 
-  if ((${#open_issues[@]} > 0)); then
+  if ((${#open_problem_issues[@]} > 0)); then
     if [[ "${in_window}" != 'true' ]]; then
       log 'outside the window; leaving the open problems issue alone'
       return 0
     fi
     local -i i
-    for ((i = 1; i < ${#open_issues[@]}; i++)); do
-      finish_issue "${open_issues[i]}" 'repository problems' 'duplicate' 'not_planned' ' resolved=1'
+    for ((i = 1; i < ${#open_problem_issues[@]}; i++)); do
+      finish_issue "${open_problem_issues[i]}" 'repository problems' 'duplicate' 'not_planned' ' resolved=1'
     done
     # GitHub may store the body with different trailing whitespace or line
     # endings, so both sides are normalized before comparing.
     if jq --exit-status --rawfile rendered "${WORK_DIR}/problems-body.md" '
       def norm: gsub("\r"; "") | sub("\\s+$"; "");
-      (.body | norm) == ($rendered | norm)' <<< "${open_issues[0]}" > /dev/null; then
+      (.body | norm) == ($rendered | norm)' <<< "${open_problem_issues[0]}" > /dev/null; then
       log 'the problems issue is up to date'
       return 0
     fi
     local updated
-    updated="$(upsert_issue "${open_issues[0]}" "${PROBLEMS_TITLE}" "${WORK_DIR}/problems-body.md")"
+    updated="$(upsert_issue "${open_problem_issues[0]}" "${PROBLEMS_TITLE}" "${WORK_DIR}/problems-body.md")"
     log "updated problems issue #${updated} (set ${fingerprint})"
     return 0
   fi
