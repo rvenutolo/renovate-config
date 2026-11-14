@@ -8,8 +8,9 @@
 #              included, is never touched.
 #
 #              `open` runs after release-please cut a release, or when the
-#              release workflow is run by hand with a tag to retry a failed
-#              `open`. If a PR the app did not open already uses this
+#              release workflow is run by hand with the latest release's tag
+#              to retry a failed `open`; by hand, any other tag stops it with
+#              exit 1 before writing anything. If a PR the app did not open already uses this
 #              release's branch, it stops with exit 1 before writing anything,
 #              since resetting the branch would destroy that PR's commits.
 #              Otherwise it closes every other open examples PR and deletes its
@@ -68,7 +69,8 @@
 #         `[<script>] ERROR: ...` report when a command fails
 # @exitcode 0 the PR was opened, refreshed or closed, or there was
 #             deliberately nothing to do
-# @exitcode 1 a GitHub API call failed, TAG names no commit,
+# @exitcode 1 a GitHub API call failed, TAG names no commit or, with no SHA,
+#             is not the latest release,
 #             scripts/update-examples rejected the examples, or someone else's
 #             PR uses this release's branch
 # @exitcode 2 a missing or unknown subcommand, or a missing or malformed
@@ -266,6 +268,22 @@ function commit_examples() {
   log "committed the examples to ${branch}"
 }
 
+# @description Stop unless TAG is the repository's latest release. `open`
+#              closes every other examples PR as superseded, so a retry by
+#              hand with an older tag would close the newer release's PR and
+#              point the examples back at the older release. A release-please
+#              run passes SHA and skips this: its TAG is the release it just
+#              cut.
+# @exitcode 1 the lookup failed, or TAG is not the latest release
+function require_latest_release() {
+  local latest
+  latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
+    || api_error "looking up the latest release failed")"
+  latest="$(jq --raw-output '.tag_name // empty' <<< "${latest}")"
+  [[ "${latest}" == "${TAG}" ]] \
+    || api_error "${TAG} is not the latest release (${latest:-none}); retry with the latest tag"
+}
+
 # @description Set SHA to the commit TAG points at. The commits endpoint peels
 #              an annotated tag to its commit.
 # @exitcode 1 the tag does not exist, the lookup failed, or the API returned
@@ -289,6 +307,7 @@ function open_cmd() {
   if [[ -n "${SHA:-}" ]]; then
     require_format SHA '^[0-9a-f]{40}$' 'a full lowercase 40-character commit SHA'
   else
+    require_latest_release
     resolve_tag_sha
   fi
   local -r branch="${BRANCH_PREFIX}${TAG}"

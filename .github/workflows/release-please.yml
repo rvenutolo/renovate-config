@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to point the examples at, e.g. v1.2.0
+        description: The latest release's tag, to point the examples at, e.g. v1.2.0
         required: true
         type: string
 permissions: {}
