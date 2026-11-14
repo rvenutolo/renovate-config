@@ -37,7 +37,11 @@ the repository up, name its CI workflow `ci`, and copy two files verbatim.
    `.github/renovate.json`, `.github/renovate.json5`, `.renovaterc`,
    `.renovaterc.json`, `.renovaterc.json5` or a `renovate` key in
    `package.json`. Renovate reads only the first config file it finds, so a
-   leftover one can take precedence and the preset is never applied.
+   leftover one can take precedence and the preset is never applied. Also
+   delete any regex manager of the repository's own that reads `# renovate:`
+   comments in `.github/workflows/`: the preset already matches them (see
+   [What the preset does](preset.md)), and two managers on the same lines
+   produce duplicate updates.
 5. **Copy both examples from the `main` branch**, not from a release tag (the
    files at a tag point at the release before it), and use them verbatim:
    - `examples/renovate.json5` to the repository root as `renovate.json5`

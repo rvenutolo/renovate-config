@@ -16,6 +16,7 @@
     "labels dependencies: Renovate PRs carry the dependencies label.",
     "nix enabled: flake.lock inputs are updated.",
     "pre-commit enabled: hook rev: values in .pre-commit-config.yaml are updated, including SHA pins with a version comment. It does nothing in a repo without that file. Renovate ships this manager disabled while it is in beta, so it is turned on explicitly.",
+    "customManagers: one regex manager for annotated tool pins in workflow files, so a tool a CI job installs by version (and sha256) is updated like any other dependency. Its own description gives the format.",
     "vulnerabilityAlerts: security fixes go out right away, each in its own PR, ignoring the weekly schedule, grouping and release age, and automerge like everything else. schedule [], minimumReleaseAge null and groupName null are the defaults, written out. It relies on Dependabot alerts being enabled for the repo.",
     "packageRules, in order: the non-major batch, the 7-day release age (which does not hold updates that have no release timestamp), the release-age carve-outs, and the exemption for this preset's own releases. Order matters because a later rule wins. Consumers override with a later packageRules entry, not a top-level key."
   ],
@@ -48,6 +49,21 @@
   "pre-commit": {
     "enabled": true
   },
+  "customManagers": [
+    {
+      "description": [
+        "Tool pins in workflow files: a '# renovate: datasource=<datasource> depName=<depName>' comment, optionally followed by ' versioning=<versioning>', directly above a <NAME>_VERSION: line, optionally followed on the very next line by <NAME>_SHA256: <64 hex>. The value may be quoted.",
+        "With datasource github-release-attachments and a _SHA256 line, Renovate updates the version and the sha256 together: it reads the new release's checksum file, or downloads the asset and hashes it. The asset is the one whose hash equals the current _SHA256.",
+        "A _SHA256 separated from its _VERSION line by any other line is not captured, so a digest cannot bind to the wrong pin. Without a versioning capture the datasource's default versioning applies.",
+        "A repository that has its own regex manager over workflow files deletes it when adopting the preset, so the same lines are not matched twice. Consumers' customManagers are appended to this one."
+      ],
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z0-9-]+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?[ \\t]*\\n[ \\t]*[A-Z0-9_]+_VERSION:[ \\t]*['\"]?(?<currentValue>[^'\"\\s]+)['\"]?[ \\t]*(?:\\n[ \\t]*[A-Z0-9_]+_SHA256:[ \\t]*['\"]?(?<currentDigest>[0-9a-f]{64})['\"]?)?"
+      ]
+    }
+  ],
   "vulnerabilityAlerts": {
     "enabled": true,
     "schedule": [],
