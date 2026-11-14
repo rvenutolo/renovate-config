@@ -1,7 +1,7 @@
 extends: default
 rules:
   line-length:
-    max: 200
+    max: 120
   document-start: disable
   truthy:
     # GitHub Actions' `on:` key

@@ -7,12 +7,17 @@
 # max_line_length keeps folded scalars folded: without it yamlfmt re-emits a
 # `>-` scalar as a single long line, tripping yamllint's line-length rule.
 #
+# scan_folded_as_literal keeps the author's line breaks in a `>-` scalar. yamlfmt
+# refolds at max_line_length but may run one word past it, so a refolded line of
+# long tokens (an egress endpoint list) can still exceed yamllint's limit.
+#
 # pad_line_comments defaults to 1, which trips yamllint's `comments` rule
 # (min-spaces-from-content: 2) on every `uses: ...@<sha>  # vX.Y.Z` pin.
 formatter:
   type: basic
   max_line_length: 120
   pad_line_comments: 2
+  scan_folded_as_literal: true
   # Purely for readability: keep the author's blank lines between jobs, rather
   # than collapsing a multi-job workflow into one unbroken wall of YAML.
   retain_line_breaks: true

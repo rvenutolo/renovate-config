@@ -245,6 +245,10 @@ function caller_if() {
   done
 }
 
+@test "yamllint: line length is capped at 120" {
+  yaml_assert "${REPO_DIR}/.yamllint.yml" '.rules["line-length"].max == 120'
+}
+
 @test "examples-pr-failure workflow: triggers are workflow_run on ci and pull_request_target closed" {
   yaml_assert "${EXAMPLES_FAILURE}" '(.on | keys) == ["pull_request_target","workflow_run"]
     and .on.workflow_run.workflows == ["ci"] and .on.workflow_run.types == ["completed"]
