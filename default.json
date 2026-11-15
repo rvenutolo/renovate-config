@@ -54,11 +54,12 @@
       "description": [
         "Tool pins in workflow files: a '# renovate: datasource=<datasource> depName=<depName>' comment, optionally followed by ' versioning=<versioning>', directly above a <NAME>_VERSION: line, optionally followed on the very next line by <NAME>_SHA256: <64 hex>. The value may be quoted.",
         "With datasource github-release-attachments and a _SHA256 line, Renovate updates the version and the sha256 together: it reads the new release's checksum file, or downloads the asset and hashes it. The asset is the one whose hash equals the current _SHA256.",
-        "A _SHA256 separated from its _VERSION line by any other line is not captured, so a digest cannot bind to the wrong pin. Without a versioning capture the datasource's default versioning applies.",
+        "A _SHA256 separated from its _VERSION line by any other line is not captured, so a digest cannot bind to the wrong pin. A comment after the _VERSION value also ends the match before the _SHA256 line, so the version would be bumped without its digest; a comment after the _SHA256 value is fine. Without a versioning capture the datasource's default versioning applies.",
+        "Only workflow files directly under the repository's .github/workflows/ are scanned: GitHub runs no others.",
         "A repository that has its own regex manager over workflow files deletes it when adopting the preset, so the same lines are not matched twice. Consumers' customManagers are appended to this one."
       ],
       "customType": "regex",
-      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>[a-z0-9-]+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?[ \\t]*\\n[ \\t]*[A-Z0-9_]+_VERSION:[ \\t]*['\"]?(?<currentValue>[^'\"\\s]+)['\"]?[ \\t]*(?:\\n[ \\t]*[A-Z0-9_]+_SHA256:[ \\t]*['\"]?(?<currentDigest>[0-9a-f]{64})['\"]?)?"
       ]
