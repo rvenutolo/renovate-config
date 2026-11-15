@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/rvenutolo/renovate-config/compare/v1.3.0...v1.3.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* scan only root workflow files for tool pins ([c788edd](https://github.com/rvenutolo/renovate-config/commit/c788eddbf0ac7cc4363c361cfc20383940ea2698))
+* scan only root workflow files for tool pins ([#25](https://github.com/rvenutolo/renovate-config/issues/25)) ([b72f999](https://github.com/rvenutolo/renovate-config/commit/b72f9991ffdace18eab6f58bfe8f81b81c288d55))
+
 ## [1.3.0](https://github.com/rvenutolo/renovate-config/compare/v1.2.1...v1.3.0) (2026-11-14)
 
 
