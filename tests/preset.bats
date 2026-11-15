@@ -146,7 +146,39 @@ function tool_pin_assert() {
 }
 
 @test "tool pins: manager scans workflow files only" {
-  preset_assert '.customManagers[0].customType == "regex" and .customManagers[0].managerFilePatterns == ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"]'
+  preset_assert '.customManagers[0].customType == "regex" and (.customManagers[0].managerFilePatterns | length) == 1'
+}
+
+# @description True if the tool-pin manager's file pattern matches path $1.
+# @arg $1 string repo-relative path
+function tool_pin_scans() {
+  jq --exit-status --arg path "$1" \
+    '.customManagers[0].managerFilePatterns[0] | ltrimstr("/") | rtrimstr("/") as $re | $path | test($re)' \
+    "${PRESET}" > /dev/null
+}
+
+@test "tool pins: root workflow files are scanned" {
+  tool_pin_scans '.github/workflows/ci.yml'
+  tool_pin_scans '.github/workflows/ci.yaml'
+}
+
+@test "tool pins: nested and non-workflow files are not scanned" {
+  run tool_pin_scans 'sub/.github/workflows/ci.yml'
+  assert_failure
+  run tool_pin_scans '.github/workflows/sub/ci.yml'
+  assert_failure
+  run tool_pin_scans '.github/dependabot.yml'
+  assert_failure
+}
+
+@test "tool pins: a comment after the sha256 keeps the digest" {
+  text="$(printf '# renovate: datasource=github-release-attachments depName=mvdan/sh\n  SHFMT_VERSION: v3.13.1\n  SHFMT_SHA256: fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1  # note\n')"
+  tool_pin_assert "${text}" 'length == 1 and .[0].currentDigest == "fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1"'
+}
+
+@test "tool pins: a comment after the version drops the digest" {
+  text="$(printf '# renovate: datasource=github-release-attachments depName=mvdan/sh\n  SHFMT_VERSION: v3.13.1  # note\n  SHFMT_SHA256: fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1\n')"
+  tool_pin_assert "${text}" 'length == 1 and .[0].currentValue == "v3.13.1" and ((.[0].currentDigest // "") == "")'
 }
 
 @test "tool pins: manager has a description" {

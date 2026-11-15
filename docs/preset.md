@@ -59,7 +59,10 @@
   come directly after the version line. With it and the
   `github-release-attachments` datasource, Renovate updates the version and the
   sha256 together, so the download stays verified. A sha256 separated from its
-  version by any other line is ignored.
+  version by any other line is ignored. Keep comments off the version line when
+  a sha256 follows: Renovate would then bump the version without the sha256. A
+  comment after the sha256 is fine. Only workflows directly under
+  `.github/workflows/` are scanned.
 
 The preset extends `config:best-practices` and still sets every behavior above
 explicitly, so an upstream change to that preset cannot silently alter one. The
