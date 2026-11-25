@@ -52,7 +52,7 @@ function preset_assert() {
 }
 
 @test "preset: dependency dashboard on, config migration off" {
-  preset_assert '.dependencyDashboard == true and .configMigration == false'
+  preset_assert '.dependencyDashboard.enabled == true and .configMigration == false'
 }
 
 @test "preset: conventional chore(deps) commits" {
@@ -123,7 +123,11 @@ function preset_assert() {
 }
 
 @test "preset: dependency dashboard title is pinned" {
-  preset_assert '.dependencyDashboardTitle == "Dependency Dashboard"'
+  preset_assert '.dependencyDashboard.title == "Dependency Dashboard"'
+}
+
+@test "preset: dependency dashboard settings use the object form only" {
+  preset_assert '(.dependencyDashboard | type) == "object" and ([keys[] | select(test("^(dependencyDashboard.+|customizeDashboard)$"))] | length) == 0'
 }
 
 @test "preset: top-level description explains each setting" {
