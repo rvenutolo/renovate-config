@@ -60,7 +60,7 @@ jobs:
       cancel-in-progress: false
     # The pinned path, SHA and tag comment run past common line limits.
     # yamllint disable-line rule:line-length
-    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@d57faf511a1664d03d13b09584d022b4a7126dac  # v1.3.1
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@ae8c237c354b90571dadde7aabd5a61679b72310  # v1.3.2
     with:
       mode: open
       run-id: ${{ format('{0}', github.event.workflow_run.id) }}
@@ -78,7 +78,7 @@ jobs:
       pull-requests: read  # read the closed PR's details
     # The pinned path, SHA and tag comment run past common line limits.
     # yamllint disable-line rule:line-length
-    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@d57faf511a1664d03d13b09584d022b4a7126dac  # v1.3.1
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@ae8c237c354b90571dadde7aabd5a61679b72310  # v1.3.2
     with:
       mode: close
       pr-number: ${{ format('{0}', github.event.pull_request.number) }}
@@ -101,7 +101,7 @@ jobs:
       group: renovate-failure-issue-sweep
       cancel-in-progress: false
     # yamllint disable-line rule:line-length
-    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@d57faf511a1664d03d13b09584d022b4a7126dac  # v1.3.1
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@ae8c237c354b90571dadde7aabd5a61679b72310  # v1.3.2
     with:
       mode: sweep
 
@@ -117,6 +117,6 @@ jobs:
       group: renovate-failure-issue-problems
       cancel-in-progress: false
     # yamllint disable-line rule:line-length
-    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@d57faf511a1664d03d13b09584d022b4a7126dac  # v1.3.1
+    uses: rvenutolo/renovate-config/.github/workflows/renovate-failure-issue.yml@ae8c237c354b90571dadde7aabd5a61679b72310  # v1.3.2
     with:
       mode: problems
