@@ -9,8 +9,7 @@
     "rebaseWhen behind-base-branch: every consuming repo is assumed to require branches to be up to date before merging, so a PR must be rebased when it falls behind the base branch, not only on conflicts. Renovate's default auto resolves to the same thing today; it is pinned here.",
     "updateNotScheduled false: nothing touches a Renovate branch outside the window, so no midweek pushes or emails. A PR that fails CI waits until it is fixed or until the next window.",
     "prHourlyLimit 0, prConcurrentLimit 0, branchConcurrentLimit 0: no PR limits inside the window, so the whole batch can open and merge in one weekend.",
-    "dependencyDashboard true: the dashboard stays on as the overview of pending and held updates.",
-    "dependencyDashboardTitle \"Dependency Dashboard\": Renovate's default, written out because the failure-issue workflow finds the Dashboard by this exact title.",
+    "dependencyDashboard enabled, title \"Dependency Dashboard\": the dashboard stays on as the overview of pending and held updates. The title is Renovate's default, written out because the failure-issue workflow finds the Dashboard by this exact title.",
     "configMigration false: config:best-practices turns on config-migration PRs, which come from a separate code path, may ignore the schedule and automerge, and would match the failure workflow's renovate/* filter. With it off, a needed migration shows as a Dependency Dashboard checkbox instead.",
     "semanticCommits enabled with type chore and scope deps: commit messages and PR titles follow the Angular convention, chore(deps): ...",
     "labels dependencies: Renovate PRs carry the dependencies label.",
@@ -36,8 +35,10 @@
   "prHourlyLimit": 0,
   "prConcurrentLimit": 0,
   "branchConcurrentLimit": 0,
-  "dependencyDashboard": true,
-  "dependencyDashboardTitle": "Dependency Dashboard",
+  "dependencyDashboard": {
+    "enabled": true,
+    "title": "Dependency Dashboard"
+  },
   "configMigration": false,
   "semanticCommits": "enabled",
   "semanticCommitType": "chore",
