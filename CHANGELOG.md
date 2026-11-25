@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.2](https://github.com/rvenutolo/renovate-config/compare/v1.3.1...v1.3.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* use dependencyDashboard object form in preset ([aa3033b](https://github.com/rvenutolo/renovate-config/commit/aa3033b3878eda7cf02d945a64b9a13bf5c542d7))
+* use dependencyDashboard object form in preset ([#29](https://github.com/rvenutolo/renovate-config/issues/29)) ([c78d84d](https://github.com/rvenutolo/renovate-config/commit/c78d84dfc0bac30ca89a76106d44032dd30abf99))
+
 ## [1.3.1](https://github.com/rvenutolo/renovate-config/compare/v1.3.0...v1.3.1) (2026-11-15)
 
 
